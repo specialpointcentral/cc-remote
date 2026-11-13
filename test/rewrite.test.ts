@@ -100,11 +100,11 @@ describe("ssh", () => {
     const saved = Bun.env.CC_REMOTE_SSH;
     try {
       Bun.env.CC_REMOTE_SSH = "/usr/bin/ssh -o ServerAliveInterval=60 -p 2222";
-      expect(rsh()).toEqual(["/usr/bin/ssh", "-o", "ServerAliveInterval=60", "-p", "2222", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3"]);
+      expect(rsh()).toEqual(["/usr/bin/ssh", "-o", "ServerAliveInterval=60", "-p", "2222", "-o", "Compression=yes", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=20"]);
       Bun.env.CC_REMOTE_SSH = "tsh ssh";
       expect(rsh()).toEqual(["tsh", "ssh"]);
       delete Bun.env.CC_REMOTE_SSH;
-      expect(rsh()).toContain("ServerAliveCountMax=3");
+      expect(rsh()).toContain("ServerAliveCountMax=20");
       expect(rsh()).toContain("ControlMaster=auto");
     } finally {
       if (saved === undefined) delete Bun.env.CC_REMOTE_SSH;

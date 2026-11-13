@@ -8,9 +8,10 @@ import { dirname, join } from "node:path";
 import pkg from "../package.json";
 import { remote } from "./options";
 import { WINDOWS } from "./platform";
-import { quote, REMOTE_PATH, rsh, runRemote } from "./ssh";
+import { hostVersion, quote, rsh, runRemote } from "./ssh";
 import { killAll } from "./tools";
 import { home } from "./tools/util";
+import { tooOld } from "./version";
 
 const USAGE = `Usage: cc-remote [--host <host>]
        cc-remote [--host <host>] --cli <claude arguments...>
@@ -28,18 +29,9 @@ Point an ACP client (Zed, paseo, ...) at \`cc-remote --host <host>\`.
 
   CC_REMOTE_SSH="ssh -p 2222"   ssh command to use, like rsync's RSYNC_RSH`;
 
-/** The oldest remote claude cc-remote has been run against. */
-const MIN_CLAUDE = "2.1.248";
-
 const fail = (message: string): never => {
   console.error(`cc-remote: ${message}`);
   process.exit(1);
-};
-
-const older = (a: string, b: string) => {
-  const [x, y] = [a, b].map((s) => s.split(/[.-]/).map(Number));
-  for (let i = 0; i < 3; i++) if (x![i] !== y![i]) return x![i]! < y![i]!;
-  return false;
 };
 
 function parse(argv: string[]) {
@@ -66,11 +58,11 @@ async function host(flag?: string): Promise<string> {
 async function doctor(target: string) {
   console.log(`cc-remote ${pkg.version} (claude-agent-acp ${acpPkg.version})`);
   console.log(`host: ${target} via ${rsh().join(" ")}`);
-  const proc = Bun.spawn([...rsh(), "-T", target, `${REMOTE_PATH} claude --version`], { stdout: "pipe", stderr: "inherit", stdin: "ignore" });
-  const out = (await new Response(proc.stdout).text()).trim();
-  if ((await proc.exited) !== 0 || !out) fail(`could not run claude on ${target}`);
+  // Always asked live; what it finds is what session starts go by for the next while.
+  const out = (await hostVersion(target, true)) ?? fail(`could not run claude on ${target}`);
   console.log(`remote claude: ${out}`);
-  if (older(out.split(" ")[0]!, MIN_CLAUDE)) fail(`remote claude is older than ${MIN_CLAUDE}. Run \`claude update\` on ${target}.`);
+  const problem = tooOld(target, out);
+  if (problem) fail(problem);
   console.log("ok");
 }
 

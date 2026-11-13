@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { isolate } from "./fixture";
 import { strip, widenMatcher } from "../src/names";
 import { commandPrefix, rewriter, type Session } from "../src/proxy";
 import { projectKey, projectsDir } from "../src/sessions";
@@ -78,20 +81,30 @@ describe("Bash rules", () => {
     expect(commandPrefix("echo $(whoami)")).toBeUndefined();
   });
   test("keeps approved prefixes here and approves matching commands", () => {
-    const s: Session = { cwd: "/work/rules", hostDir: ".cc-remote/ws/box/work/rules", mode: "default" };
-    const r = rewriter(s);
-    const ask = (command: string) => {
-      const replies: string[] = [];
-      const line = r.outbound(JSON.stringify({ type: "control_request", request_id: "q", request: { subtype: "can_use_tool", tool_name: "mcp__cc__Bash", input: { command }, permission_suggestions: [{ type: "addRules", rules: [{ toolName: "mcp__cc__Bash" }], behavior: "allow", destination: "localSettings" }] } }), (x) => replies.push(x));
-      return { line: line && JSON.parse(line), replies };
-    };
-    const first = ask("npm test");
-    expect(first.line.request.permission_suggestions[0].rules).toEqual([{ toolName: "Bash", ruleContent: "npm test:*" }]);
-    const reply = r.inbound(JSON.stringify({ type: "control_response", response: { subtype: "success", request_id: "q", response: { behavior: "allow", updatedPermissions: first.line.request.permission_suggestions } } }));
-    expect(JSON.parse(reply).response.response.updatedPermissions).toEqual([]);
-    expect(ask("npm test -- a.ts").line).toBeNull();
-    expect(ask("npm testing").line).not.toBeNull();
-    expect(ask("npm test; rm -rf ~").line).not.toBeNull();
+    // A temporary home and project: the approval is written to the project's settings.local.json.
+    const iso = isolate();
+    const cwd = mkdtempSync(join(tmpdir(), "cc-remote-rules-"));
+    try {
+      const s: Session = { cwd, hostDir: `.cc-remote/ws/box${cwd}`, mode: "default" };
+      const r = rewriter(s);
+      const ask = (command: string) => {
+        const replies: string[] = [];
+        const line = r.outbound(JSON.stringify({ type: "control_request", request_id: "q", request: { subtype: "can_use_tool", tool_name: "mcp__cc__Bash", input: { command }, permission_suggestions: [{ type: "addRules", rules: [{ toolName: "mcp__cc__Bash" }], behavior: "allow", destination: "localSettings" }] } }), (x) => replies.push(x));
+        return { line: line && JSON.parse(line), replies };
+      };
+      const first = ask("npm test");
+      expect(first.line.request.permission_suggestions[0].rules).toEqual([{ toolName: "Bash", ruleContent: "npm test:*" }]);
+      const reply = r.inbound(JSON.stringify({ type: "control_response", response: { subtype: "success", request_id: "q", response: { behavior: "allow", updatedPermissions: first.line.request.permission_suggestions } } }));
+      expect(JSON.parse(reply).response.response.updatedPermissions).toEqual([]);
+      expect(ask("npm test -- a.ts").line).toBeNull();
+      expect(ask("npm testing").line).not.toBeNull();
+      expect(ask("npm test; rm -rf ~").line).not.toBeNull();
+      const local = join(cwd, ".claude", "settings.local.json");
+      expect(existsSync(local) && readFileSync(local, "utf8")).toContain("Bash(npm test:*)");
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+      iso.restore();
+    }
   });
 });
 

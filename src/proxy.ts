@@ -1,10 +1,12 @@
 import type { SpawnedProcess } from "@anthropic-ai/claude-agent-sdk";
 import type { ChildProcess } from "node:child_process";
-import { isAbsolute, join, relative, resolve } from "node:path";
+import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { PassThrough, type Readable } from "node:stream";
 import { EDITS, LOCAL, PREFIX, strip } from "./names";
 import { SHELL } from "./platform";
+import { HOOK_ID, policyHook, shellVerdict, withPolicyHook, workspaceEdit } from "./policy";
+import { type Destination, persistAllowRule, type ShellTool, TrackedSettingsError, type Verdict } from "./rules";
 import { projectKey, projectsDir } from "./sessions";
 
 /** What one claude process needs to have its messages read as if it ran in `cwd` on this machine. */
@@ -15,21 +17,12 @@ export type Session = {
   hostDir: string;
   /** claude's permission mode, followed through the SDK's requests. */
   mode: string;
+  /** Additional local directories that count as the workspace, as `--add-dir` ones do for claude. */
+  dirs?: string[];
 };
 
 const escape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const jsonText = (s: string) => JSON.stringify(s).slice(1, -1);
-
-const inside = (path: string, dir: string) => {
-  const rel = relative(dir, path);
-  return !rel.startsWith("..") && !isAbsolute(rel);
-};
-
-/**
- * Shell command prefixes the user said not to ask about again, per directory, for as long as
- * cc-remote runs. claude can't keep these for us: it matches command rules only on its own shell tools.
- */
-const bashRules = new Map<string, Set<string>>();
 
 /** Chaining, pipes, substitution and redirection can hide a second command behind an approved one. */
 const COMPOUND = /[;&|`<>\n]|\$\(/;
@@ -41,11 +34,8 @@ export function commandPrefix(command: string): string | undefined {
   return words[1] && /^[a-z][\w-]*$/.test(words[1]) ? `${words[0]} ${words[1]}` : words[0];
 }
 
-const approved = (cwd: string, command: string) => {
-  if (COMPOUND.test(command)) return false;
-  const c = command.trim();
-  return [...(bashRules.get(cwd) ?? [])].some((p) => c === p || c.startsWith(`${p} `));
-};
+/** Permission update destinations that name a settings file, which persistAllowRule can write. */
+const FILES: string[] = ["localSettings", "projectSettings", "userSettings"] satisfies Destination[];
 
 /**
  * Rewrites the stream between the SDK and the remote claude, both ways:
@@ -53,15 +43,35 @@ const approved = (cwd: string, command: string) => {
  * - claude → SDK: the local tools lose their `mcp__cc__` prefix, so ACP renders them as the
  *   built-ins; the host folder becomes the local cwd; transcript mirror frames point into the
  *   local projects folder, where the SDK expects them.
- * - SDK → claude: permission rules the user approves for a local tool get the prefix back.
+ * - SDK → claude: permission rules the user approves for a local tool get the prefix back, and
+ *   `initialize` gets cc-remote's own PreToolUse hook (policy.ts), whose callbacks are answered here.
  *
  * It also answers claude's permission requests that claude would answer itself for its built-ins:
- * local edits under acceptEdits, and shell commands the user said not to ask about again.
+ * local edits under acceptEdits, and shell commands that the user's rules or this session's grants
+ * decide. claude matches `Bash(...)` rules only on its own shell tools, so cc-remote keeps them:
+ * "always allow" goes to the local settings file, as Claude Code's own does, and "allow for this
+ * session" stays in memory for as long as this claude runs.
  */
 export function rewriter(s: Session) {
   const hostPath = new RegExp(`(?:/[^"\\\\/\\s]+)*/${escape(jsonText(s.hostDir))}(?=["/\\\\\\s]|$)`, "g");
   const local = jsonText(s.cwd);
   const transcripts = join(projectsDir(), projectKey(s.cwd));
+  /** This session's shell grants, as allow rules: `Bash(npm test:*)`. */
+  const grants = new Set<string>();
+
+  /** An "always allow" for the shell goes to a settings file; a session grant, or a failed write, stays here. */
+  function grant(ruleContent: string, destination: string) {
+    if (FILES.includes(destination)) {
+      try {
+        persistAllowRule(s.cwd, ruleContent, SHELL as ShellTool, destination as Destination);
+        return;
+      } catch (e) {
+        if (e instanceof TrackedSettingsError) console.error(`cc-remote: ${e.message}, so ${SHELL}(${ruleContent}) is allowed for this session only`);
+        else console.error(`cc-remote: could not save ${SHELL}(${ruleContent}), so it is allowed for this session only: ${(e as Error).message}`);
+      }
+    }
+    grants.add(`${SHELL}(${ruleContent})`);
+  }
 
   /** Returns the line for the SDK, or null when it was answered here; `reply` writes to claude. */
   function outbound(line: string, reply: (line: string) => void): string | null {
@@ -75,18 +85,31 @@ export function rewriter(s: Session) {
         return JSON.stringify(m);
       }
     }
+    if (text.includes('"permissionMode"')) {
+      // claude's init and status messages say which mode it is in, whoever changed it.
+      const m = JSON.parse(text);
+      if (m.type === "system" && typeof m.permissionMode === "string") s.mode = m.permissionMode;
+    }
+    const answer = (request_id: string, response: unknown) => {
+      reply(JSON.stringify({ type: "control_response", response: { subtype: "success", request_id, response } }));
+      return null;
+    };
+    if (text.includes('"hook_callback"')) {
+      const m = JSON.parse(text);
+      if (m.type === "control_request" && m.request?.subtype === "hook_callback" && m.request.callback_id === HOOK_ID) {
+        const input = m.request.input;
+        if (typeof input?.permission_mode === "string") s.mode = input.permission_mode;
+        return answer(m.request_id, policyHook(input, s.cwd, grants, s.dirs));
+      }
+    }
     if (text.includes('"can_use_tool"')) {
       const m = JSON.parse(text);
       const req = m.request;
       if (m.type !== "control_request" || req?.subtype !== "can_use_tool") return text;
-      const allow = () => {
-        const response = { behavior: "allow", updatedInput: req.input };
-        reply(JSON.stringify({ type: "control_response", response: { subtype: "success", request_id: m.request_id, response } }));
-        return null;
-      };
+      // Asks that no stored grant may answer, such as a classifier's escalation, go to the user.
+      const allow = () => (req.requires_user_interaction ? text : answer(m.request_id, { behavior: "allow", updatedInput: req.input }));
       if (EDITS.includes(req.tool_name)) {
-        const target = String(req.input?.file_path ?? req.input?.notebook_path ?? "");
-        const local = target !== "" && inside(resolve(s.cwd, target), s.cwd);
+        const local = workspaceEdit(String(req.input?.file_path ?? req.input?.notebook_path ?? ""), s.cwd, s.dirs);
         if (local && s.mode === "acceptEdits") return allow();
         // As claude offers for its own edits: accept the rest of this session's edits.
         req.permission_suggestions = local ? [{ type: "setMode", mode: "acceptEdits", destination: "session" }] : undefined;
@@ -94,7 +117,25 @@ export function rewriter(s: Session) {
       }
       if (req.tool_name === SHELL) {
         const command = String(req.input?.command ?? "");
-        if (approved(s.cwd, command)) return allow();
+        let verdict: Verdict;
+        try {
+          verdict = shellVerdict(command, s.mode, s.cwd, grants);
+        } catch (e) {
+          console.error(`cc-remote: could not check a command against the permission rules: ${(e as Error).message}`);
+          verdict = { decision: "ask" };
+        }
+        if (verdict.decision === "deny") return answer(m.request_id, { behavior: "deny", message: `cc-remote: ${verdict.reason}` });
+        if (verdict.decision === "allow") return allow();
+        if (verdict.decision === "ask") {
+          // The user's ask rule (or a critical path) forced this prompt, and outranks any allow rule:
+          // no "don't ask again", and a person answers it. An app that approves everything itself in
+          // its own full-access mode, as Orca does, still asks the user for a request marked so.
+          req.permission_suggestions = undefined;
+          req.suppress_always_allow_rule = true;
+          req.requires_user_interaction = true;
+          if (verdict.reason) req.decision_reason ??= `cc-remote: ${verdict.reason}`;
+          return JSON.stringify(m);
+        }
         // claude suggests approving the whole tool, as for any MCP tool. Offer the command instead.
         const prefix = commandPrefix(command);
         req.permission_suggestions = prefix
@@ -107,6 +148,10 @@ export function rewriter(s: Session) {
   }
 
   function inbound(line: string): string {
+    if (line.includes('"initialize"')) {
+      const m = JSON.parse(line);
+      if (m.type === "control_request" && m.request?.subtype === "initialize") return JSON.stringify({ ...m, request: withPolicyHook(m.request) });
+    }
     if (line.includes('"set_permission_mode"')) {
       const m = JSON.parse(line);
       if (m.request?.subtype === "set_permission_mode") s.mode = m.request.mode;
@@ -119,9 +164,8 @@ export function rewriter(s: Session) {
       if (u.type === "setMode" && u.destination === "session") s.mode = u.mode;
       if (!Array.isArray(u.rules)) continue;
       u.rules = u.rules.filter((r: { toolName: string; ruleContent?: string }) => {
-        if (r.toolName === SHELL && r.ruleContent && u.behavior === "allow") {
-          if (!bashRules.has(s.cwd)) bashRules.set(s.cwd, new Set());
-          bashRules.get(s.cwd)!.add(r.ruleContent.replace(/:\*$/, ""));
+        if (r.toolName === SHELL && r.ruleContent && u.behavior === "allow" && u.type !== "removeRules") {
+          grant(r.ruleContent, u.destination);
           return false;
         }
         if (LOCAL.includes(r.toolName)) r.toolName = PREFIX + r.toolName;

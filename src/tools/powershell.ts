@@ -1,6 +1,6 @@
 import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { MAX_OUTPUT, shellTool, TMP } from "./shell";
+import { type Launch, MAX_OUTPUT, shellTool, TMP } from "./shell";
 
 /** PowerShell 7 when it's installed, else the Windows PowerShell 5.1 every Windows has. */
 const pwsh = Bun.which("pwsh");
@@ -25,17 +25,16 @@ ${command}
 exit $LASTEXITCODE
 `;
 
-function argv(command: string) {
+/** PowerShell parses the whole file before running it, so a syntax error keeps it from deleting itself; done removes it then. */
+function launch(command: string): Launch {
   const file = join(TMP, `cc-remote-ps-${process.pid}-${++scripts}.ps1`);
   // Windows PowerShell reads a script without a BOM as the ANSI code page.
   writeFileSync(file, `﻿${script(command)}`);
-  return [exe, "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", file];
+  return {
+    argv: [exe, "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", file],
+    done: () => { try { rmSync(file, { force: true }); } catch {} },
+  };
 }
-
-/** PowerShell parses the whole file before running it, so a syntax error keeps it from deleting itself. */
-const cleanup = (argv: string[]) => {
-  try { rmSync(argv.at(-1)!, { force: true }); } catch {}
-};
 
 const chaining = pwsh
   ? "Chain dependent commands with && (PowerShell 7); make independent calls in parallel in one response"
@@ -53,7 +52,6 @@ export const powershell = shellTool({
 - Set run_in_background for long-running processes such as dev servers. You get back an ID and an output file to Read; the process stops when the session ends
 - Prefer Read, Edit, Write, Glob and Grep over Get-Content, Set-Content, Get-ChildItem and Select-String for file work
 - ${chaining}`,
-  argv,
-  cleanup,
+  launch,
   stopHint: (pid) => `taskkill /PID ${pid} /T /F`,
 });

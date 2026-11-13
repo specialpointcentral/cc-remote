@@ -11,7 +11,12 @@ export const TEAMS_OFF = ' [--settings] [{"env":{"CLAUDE_CODE_EXPERIMENTAL_AGENT
  *
  * - FAKE_REFUSE_SHARED: refuse a session on a shared connection, as a master at sshd's MaxSessions;
  * - FAKE_NOISE: print a line on stdout and one on stderr before the command, as a chatty login shell;
- * - FAKE_CLAUDE_VERSION: what claude --version prints.
+ * - FAKE_CLAUDE_VERSION: what claude --version prints;
+ * - FAKE_MASTER=up|stale: a shared connection is there for `ssh -O check` (else none), and when
+ *   stale it never runs `true`;
+ * - FAKE_SSH_DOWN: every connection that names ControlPath=none fails, as with no network;
+ * - FAKE_SSH_SLOW: seconds a connection that names ControlPath=none takes to come up, as a
+ *   handshake over a slow link.
  *
  * And for setup's checks, all off unless set:
  *
@@ -34,9 +39,15 @@ export function fakeHost(dir: string) {
 printf '%s\n' "$*" >> "$FAKE_SSH_LOG"
 all="$*"
 case "$*" in *ControlMaster=no*) shared=;; *ControlMaster=auto*) shared=1;; *) shared=;; esac
+case " $* " in *" -O "*) [ -n "$FAKE_MASTER" ] && exit 0; echo "Control socket connect: No such file or directory" >&2; exit 255;; esac
+case "$*" in *ControlPath=none*)
+  if [ -n "$FAKE_SSH_DOWN" ]; then echo "ssh: connect to host box port 22: Network is unreachable" >&2; exit 255; fi
+  [ -z "$FAKE_SSH_SLOW" ] || sleep "$FAKE_SSH_SLOW";;
+esac
 while [ $# -gt 1 ]; do
   case "$1" in -o|-p|-i) shift 2;; -*) shift;; *) shift; break;; esac
 done
+if [ "$FAKE_MASTER" = stale ] && [ "$1" = true ]; then exec sleep 60; fi
 keys="$FAKE_HOST_HOME/.ssh/authorized_keys"
 case "$FAKE_SSH_FAIL" in
   hostkey)

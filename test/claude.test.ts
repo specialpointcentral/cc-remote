@@ -252,6 +252,17 @@ describe("cc-remote claude", () => {
     expect(host.calls()).toHaveLength(2);
   }, SPAWNS);
 
+  test("version probes that start together ask the host once", async () => {
+    const fresh = join(dir, "entry", "cache-together");
+    host.reset();
+    const probe = () => Bun.spawn(["bun", join(import.meta.dir, "..", "src", "main.ts"), "--host", "box", "claude", "--version"], {
+      cwd: join(dir, "work-entry"), env: { ...Bun.env, ...host.env, XDG_CACHE_HOME: fresh }, stdin: "ignore", stdout: "pipe",
+    });
+    const outs = await Promise.all([probe(), probe(), probe()].map((p) => new Response(p.stdout).text()));
+    expect(outs).toEqual(Array(3).fill("2.1.323 (Claude Code)\n"));
+    expect(host.calls()).toHaveLength(1);
+  }, SPAWNS);
+
   test("passes claude's subcommands to the host as they are, and refuses an interactive session", () => {
     expect(run("auth", "status", "--json").stdout.toString()).toStartWith("ARGS [auth] [status] [--json]");
     const interactive = run("--dangerously-skip-permissions");

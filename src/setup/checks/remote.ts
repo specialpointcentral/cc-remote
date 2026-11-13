@@ -178,6 +178,20 @@ function serverChecks(f: Facts): Check[] {
     ? { id: "R14", label: t("resources", "资源"), status: "warn", detail: `${problems.join("; ")} (${facts})`, remedy: [t("all project machines' claude processes run as this one user and share the subscription's rate limits", "所有项目机器的 claude 进程都以这一个用户运行，并共享订阅的速率限制")] }
     : { id: "R14", label: t("resources", "资源"), status: "pass", detail: facts });
 
+  // R15: python3, which the relay that keeps sessions across dropped connections runs on.
+  const python = kv.PYTHON_VERSION?.match(/^(\d+)\.(\d+)/);
+  const fit = python && (Number(python[1]) > 3 || (Number(python[1]) === 3 && Number(python[2]) >= 6));
+  checks.push(fit
+    ? { id: "R15", label: "python3", status: "pass", detail: t(`${kv.PYTHON_VERSION}: sessions survive a dropped connection`, `${kv.PYTHON_VERSION}：连接断开后会话可以继续`) }
+    : {
+        id: "R15", label: "python3", status: "warn",
+        detail: kv.PYTHON_VERSION
+          ? t(`${kv.PYTHON_VERSION} is older than 3.6: a dropped connection ends the session's claude`, `${kv.PYTHON_VERSION} 低于 3.6：连接断开会结束会话中的 claude`)
+          : t(`not found on ${h}: a dropped connection ends the session's claude`, `${h} 上未找到：连接断开会结束会话中的 claude`),
+        remedy: [t(`needed for reconnection: ask ${h}'s admin to install python3 (3.6 or later; setup doesn't install anything there)`, `重连需要它：请 ${h} 的管理员安装 python3（3.6 或更高版本；setup 不会在那里安装任何东西）`)],
+        short: t("no python3: no reconnection", "无 python3：不能重连"),
+      });
+
   // R3: refusals on the shared connection now.
   if (f.refused) checks.push({ id: "R3", label: t("sharing", "共享连接"), status: "warn", detail: t("sshd refused a session on the shared connection just now (MaxSessions)", "sshd 刚刚在共享连接上拒绝了一个会话（MaxSessions）") });
 

@@ -299,6 +299,7 @@ describe("the central probe", () => {
       expect(p.kv.CC_DIR).toBe("dir");
       expect(p.sections.marker).toBe('{"machineId":"abc"}');
       expect(Number(p.kv.NOFILE)).toBeGreaterThan(0);
+      expect(p.kv.PYTHON_VERSION).toMatch(/^3\.\d+\.\d+$/);
       expect(Number(p.kv.NPROC) > 0 || p.kv.NPROC === "unlimited").toBe(true);
     });
   }
@@ -344,6 +345,11 @@ describe("the central probe", () => {
     expect(run({ ...base, LOGIN_SHELL: "/usr/bin/fish" }).checks.find((c) => c.id === "R4")?.status).toBe("warn");
     expect(run({ ...base, TOOLS_MISSING: " tar" }).checks.find((c) => c.id === "R6")?.status).toBe("fail");
     expect(run(base, { machineId: "mine" }, { auth, marker: '{"machineId":"other"}' }).checks.find((c) => c.id === "R12")?.status).toBe("warn");
+    // python3 for the relay: advice, never a stop.
+    expect(checks.find((c) => c.id === "R15")).toMatchObject({ status: "warn", short: "no python3: no reconnection" });
+    expect(run({ ...base, PYTHON_VERSION: "3.5.2" }).checks.find((c) => c.id === "R15")!.detail).toContain("older than 3.6");
+    expect(run({ ...base, PYTHON_VERSION: "3.6.8" })).toMatchObject({ abort: undefined });
+    expect(run({ ...base, PYTHON_VERSION: "3.6.8" }).checks.find((c) => c.id === "R15")?.status).toBe("pass");
   });
 });
 

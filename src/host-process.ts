@@ -2,6 +2,27 @@ import { type ChildProcess, spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { PassThrough, Writable } from "node:stream";
 import { missingIn, type Tokens } from "./host-files";
+import { WINDOWS } from "./platform";
+import { type ExecResult, GONE_TOKEN, RelayClient } from "./relay";
+
+/**
+ * How a session under the relay (relay.ts) keeps going after the link drops: heartbeats, the
+ * reconnect, and what a reconnect runs.
+ */
+export type RelayPlan = {
+  /** ssh's argv that attaches to the relay again: always a connection of its own. */
+  attach(): string[];
+  /** The line the attach command prints before the relay's frames, after anything the host's shell says. */
+  token: string;
+  /** A heartbeat this often. */
+  pingMs: number;
+  /** The link counts as dead after this long without a frame. */
+  linkTimeoutMs: number;
+  /** How long the host keeps claude without a connection; reconnecting stops when it runs out. */
+  graceMs: number;
+  /** The link went silent: a shared connection to the host may be just as stuck. */
+  silent?(): void;
+};
 
 /**
  * How one session start goes, as launch() in ssh.ts plans it. The start's remote command checks
@@ -14,14 +35,37 @@ export type Plan = {
   upload(missing: number[], shared: boolean): { argv: string[]; input: Uint8Array };
   tokens: Tokens;
   /**
-   * Gets what follows the token on the ready line (see Ready in host-files.ts), and returns why
-   * claude must not go on, if it mustn't.
+   * Gets what follows the token on the ready line (see Ready in host-files.ts), and says why
+   * claude must not go on, if it mustn't, and whether claude started under the relay.
    */
-  ready?(rest: string): string | undefined;
+  ready?(rest: string): { problem?: string; relay?: boolean };
   /** Why nothing may start at all, such as a host claude known to be too old. */
   refuse?: string;
   signal?: AbortSignal;
+  /** When the start may come up under the relay, how to keep it going. */
+  relay?: RelayPlan;
 };
+
+/** After a SIGTERM, how long the host has to report claude's exit before cc-remote goes anyway. */
+export const STOP_WAIT_MS = 2_000;
+
+/** Reconnect attempts after the first, which is immediate: then 1, 2, 4, 8 and every 15 seconds. */
+const BACKOFF_MS = [1_000, 2_000, 4_000, 8_000, 15_000];
+
+/** Sessions under the relay, to stop as cc-remote exits. */
+const live = new Set<HostProcess>();
+
+/**
+ * Asks every session under the relay to stop claude, and waits for their exits, each at most
+ * STOP_WAIT_MS: an exiting cc-remote that only dropped its connections would leave claude running
+ * on the host for the grace period.
+ */
+export async function stopRelays(): Promise<void> {
+  await Promise.all([...live].map((h) => new Promise<void>((done) => {
+    h.once("exit", () => done());
+    if (!h.kill("SIGTERM")) done();
+  })));
+}
 
 /**
  * What ssh says, exiting with 255, when sshd refuses the multiplexing master another session (its
@@ -31,6 +75,27 @@ export const REFUSED = /administratively prohibited|session request failed|sessi
 
 /** Output kept from a channel before claude starts: shown when it fails, or once claude is up. */
 const HELD_BYTES = 64 << 10;
+
+/**
+ * Stops a claude that started under the relay but must not go on: connects, asks for the end,
+ * and closes the channel once it comes (or after a few seconds).
+ */
+function stopAtOnce(child: ChildProcess, pending: Buffer) {
+  const end = () => child.stdin!.end();
+  const client = new RelayClient({ output() {}, stderr() {}, exit: end });
+  client.connect((bytes) => child.stdin!.writable && child.stdin!.write(bytes));
+  client.terminate();
+  const feed = (chunk: Buffer) => {
+    try {
+      client.receive(chunk);
+    } catch {
+      end();
+    }
+  };
+  child.stdout!.on("data", feed);
+  if (pending.length) feed(pending);
+  setTimeout(() => child.kill("SIGKILL"), 8_000).unref();
+}
 
 /** Takes a stream's output a line at a time. */
 function lines(onLine: (line: string) => void) {
@@ -106,6 +171,18 @@ export class HostProcess extends EventEmitter {
   private stopping = false;
   private started = false;
   private done = false;
+  /** Under the relay: the protocol's state, the connection it uses now, and its timers. */
+  private client?: RelayClient;
+  private conn?: ChildProcess;
+  private timers: ReturnType<typeof setInterval>[] = [];
+  private stopTimer?: ReturnType<typeof setTimeout>;
+  private reconnecting = false;
+  private onHello?: () => void;
+  private wakers = new Set<() => void>();
+  private lastError = "";
+  /** Whether the ssh running now is a start, which may come up under the relay. */
+  private starting = false;
+  private stopSignal: NodeJS.Signals = "SIGTERM";
 
   constructor(private readonly plan: Plan) {
     super();
@@ -115,11 +192,39 @@ export class HostProcess extends EventEmitter {
     queueMicrotask(() => void this.run());
   }
 
+  /** The pid of the ssh that carries the relay now, for tests and diagnostics. */
+  get link(): number | undefined {
+    return this.conn?.pid;
+  }
+
   kill(signal: NodeJS.Signals = "SIGTERM"): boolean {
     if (this.done) return false;
     this.stopping = true;
     this.killed = true;
+    this.stopSignal = signal;
+    if (this.plan.relay && !this.client && this.starting && this.current) {
+      // The start may have claude running under the relay already, which would outlive the
+      // channel: its ready line gets a moment to come, and then the relay stops claude.
+      const start = this.current;
+      this.stopTimer ??= setTimeout(() => start.kill("SIGKILL"), STOP_WAIT_MS);
+      return true;
+    }
+    if (this.client) {
+      // Dropping the connection would leave claude running on the host; the relay stops it.
+      this.client.terminate();
+      this.stopTimer ??= setTimeout(() => this.endRelay(null, signal, true), STOP_WAIT_MS);
+      return true;
+    }
     return this.current ? this.current.kill(signal) : true;
+  }
+
+  /**
+   * Runs a shell script on the host over the relay's connection, in claude's folder there, when
+   * claude runs under the relay. Rejects at once otherwise, and when the session ends first.
+   */
+  exec(script: string, input?: Uint8Array): Promise<ExecResult> {
+    if (!this.client || this.done) return Promise.reject(new Error("no relay"));
+    return this.client.exec(script, input);
   }
 
   private async run() {
@@ -137,6 +242,7 @@ export class HostProcess extends EventEmitter {
         process.stderr.write(r.held);
         return this.finish(1, null);
       }
+      if (this.killed) return this.finish(null, this.stopSignal);
       if (!this.stopping && r.refused && r.code === 255 && shared) {
         shared = false;
         continue;
@@ -158,7 +264,10 @@ export class HostProcess extends EventEmitter {
 
   private spawn(argv: string[]): ChildProcess {
     this.channels++;
-    const child = spawn(argv[0]!, argv.slice(1), { stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
+    // Under the relay, ssh gets a process group of its own: a signal to cc-remote's group, as Orca
+    // sends to stop a chat, must leave the connection up for cc-remote to stop claude through it.
+    const detached = !!this.plan.relay && !WINDOWS;
+    const child = spawn(argv[0]!, argv.slice(1), { stdio: ["pipe", "pipe", "pipe"], windowsHide: true, detached });
     this.current = child;
     child.stdin!.on("error", () => {});
     return child;
@@ -168,6 +277,8 @@ export class HostProcess extends EventEmitter {
   private attempt(shared: boolean): Promise<Outcome> {
     const { tokens } = this.plan;
     const child = this.spawn(this.plan.start(shared));
+    this.starting = true;
+    child.once("close", () => (this.starting = false));
     return new Promise((settle) => {
       let held = "";
       let missing: number[] | undefined;
@@ -199,17 +310,25 @@ export class HostProcess extends EventEmitter {
       };
       const ready = (rest: string) => {
         child.stdout!.off("data", onData);
-        const problem = this.plan.ready?.(rest);
-        if (problem) {
-          // claude has just started on the host; without its input it ends with the channel.
-          this.stopping = rejected = true;
-          held += `cc-remote: ${problem}\n`;
-          child.kill("SIGTERM");
+        const answer = this.plan.ready?.(rest) ?? {};
+        const relay = !!answer.relay && !!this.plan.relay;
+        if (answer.problem || this.stopping) {
+          rejected = !!answer.problem;
+          this.stopping = true;
+          if (answer.problem) held += `cc-remote: ${answer.problem}\n`;
+          // claude has just started on the host. Without its input it ends with the channel, but
+          // under the relay it would outlive it: there the relay stops it.
+          if (relay) stopAtOnce(child, pending);
+          else child.kill("SIGTERM");
           return;
         }
         up = this.started = true;
         errors.flush();
         process.stderr.write(held);
+        if (relay) {
+          this.startRelay(child, pending);
+          return settle({ kind: "started" });
+        }
         if (pending.length) this.stdout.write(pending);
         child.stdout!.pipe(this.stdout);
         this.stdin.open(child.stdin!);
@@ -233,7 +352,7 @@ export class HostProcess extends EventEmitter {
         if (pending.length) hold(pending.toString());
         settle({ kind: "stopped", code: child.exitCode ?? code, signal: child.signalCode ?? signal, held, missing, refused, rejected });
       });
-      if (this.stopping) child.kill("SIGTERM");
+      if (this.stopping && !this.plan.relay) child.kill("SIGTERM");
     });
   }
 
@@ -262,6 +381,211 @@ export class HostProcess extends EventEmitter {
     }
   }
 
+  /** claude is up under the relay, on the start's channel: from here on, the relay protocol. */
+  private startRelay(first: ChildProcess, pending: Buffer) {
+    const relay = this.plan.relay!;
+    const client = (this.client = new RelayClient({
+      output: (chunk) => this.stdout.write(chunk),
+      stderr: (chunk) => process.stderr.write(chunk),
+      exit: (code, signal) => {
+        // The client said bye; ending the channel ends the host's side of it.
+        this.conn?.stdin?.end();
+        this.endRelay(code, signal);
+      },
+      hello: () => this.onHello?.(),
+      fatal: (message) => this.relayFailed(`cc-remote: ${message}`),
+    }));
+    this.stdin.open(new Writable({
+      write: (chunk: Buffer, _encoding, done) => {
+        client.write(chunk);
+        done();
+      },
+      final: (done) => {
+        client.end();
+        done();
+      },
+    }));
+    if (this.stopping) client.terminate();
+    live.add(this);
+    this.timers.push(setInterval(() => client.ping(), relay.pingMs));
+    this.timers.push(setInterval(() => this.watch(), Math.min(1_000, relay.linkTimeoutMs / 4)));
+    void this.connection(first, { initial: pending }).then((r) => {
+      if (r !== "up") void this.reconnect();
+    });
+  }
+
+  /**
+   * A link silent past the timeout is dead: its ssh goes, which starts a reconnect. Only a
+   * connection the daemon has taken up counts; one still connecting has its own time limit.
+   */
+  private watch() {
+    const relay = this.plan.relay!;
+    const conn = this.conn;
+    if (!conn || this.done || !this.client?.connected || Date.now() - this.client.lastFrame <= relay.linkTimeoutMs) return;
+    process.stderr.write(`cc-remote: no word from the host for ${Math.round(relay.linkTimeoutMs / 1000)}s\n`);
+    this.conn = undefined;
+    this.client.disconnect();
+    relay.silent?.();
+    // A frozen ssh may never get to a SIGTERM.
+    conn.kill("SIGKILL");
+  }
+
+  /**
+   * One connection to the relay, the start's or a reconnect's: settles "up" once the daemon has
+   * said hello on it, "gone" when the host has no daemon for this session any more, and "failed"
+   * when the connection ends before either. A connection that was up and drops starts a reconnect.
+   */
+  private connection(child: ChildProcess, how: { initial?: Buffer; token?: string }): Promise<"up" | "gone" | "failed"> {
+    const client = this.client!;
+    const relay = this.plan.relay!;
+    this.conn = child;
+    return new Promise((settle) => {
+      let framing = !how.token;
+      let up = false;
+      let ran = false;
+      let err = "";
+      let lines = Buffer.alloc(0);
+      const timer = setTimeout(() => { if (!up) child.kill("SIGKILL"); }, relay.linkTimeoutMs);
+      const frames = (chunk: Buffer) => {
+        try {
+          client.receive(chunk);
+        } catch (e) {
+          process.stderr.write(`cc-remote: ${(e as Error).message}\n`);
+          child.kill("SIGKILL");
+        }
+      };
+      const begin = () => {
+        framing = true;
+        client.connect((bytes) => {
+          if (this.conn === child && child.stdin!.writable) child.stdin!.write(bytes);
+        });
+      };
+      this.onHello = () => {
+        if (this.conn !== child || up) return;
+        up = true;
+        clearTimeout(timer);
+        settle("up");
+      };
+      child.stdout!.on("data", (chunk: Buffer) => {
+        if (framing) return frames(chunk);
+        lines = Buffer.concat([lines, chunk]);
+        for (let nl = lines.indexOf(10); nl >= 0; nl = lines.indexOf(10)) {
+          const line = lines.subarray(0, nl).toString().replace(/\r$/, "");
+          lines = lines.subarray(nl + 1);
+          if (line !== how.token) continue; // The host's shell talking.
+          ran = true;
+          begin();
+          if (lines.length) frames(lines);
+          return;
+        }
+      });
+      if (how.token) {
+        child.stderr!.on("data", (chunk: Buffer) => {
+          if (up) process.stderr.write(chunk);
+          else if (err.length < HELD_BYTES) err += chunk;
+        });
+      } else {
+        begin();
+        if (how.initial?.length) frames(how.initial);
+      }
+      let closed = false;
+      const close = () => {
+        if (closed) return;
+        closed = true;
+        clearTimeout(timer);
+        if (this.conn === child) {
+          this.conn = undefined;
+          client.disconnect();
+        }
+        if (up) {
+          if (!this.done) void this.reconnect();
+          return;
+        }
+        this.lastError = err.trim().split("\n").filter((l) => !l.includes(GONE_TOKEN)).pop() ?? "";
+        // The host ran the attach and it found no daemon, or the daemon never answered.
+        settle(err.includes(GONE_TOKEN) || ran ? "gone" : "failed");
+      };
+      child.once("close", close);
+      child.once("error", (e) => {
+        err += `${e.message}\n`;
+        close();
+      });
+    });
+  }
+
+  /**
+   * Attaches to the relay again, over connections of its own: at once, then with a growing pause,
+   * for as long as the host keeps claude without a connection.
+   */
+  private async reconnect() {
+    if (this.reconnecting || this.done || !this.client) return;
+    this.reconnecting = true;
+    const relay = this.plan.relay!;
+    if (!this.stopping) process.stderr.write("cc-remote: lost the connection to the host; reconnecting\n");
+    const deadline = this.client.lastFrame + relay.graceMs;
+    for (let attempt = 0; !this.done; attempt++) {
+      const wait = attempt ? BACKOFF_MS[Math.min(attempt - 1, BACKOFF_MS.length - 1)]! : 0;
+      if (Date.now() + wait > deadline) {
+        const why = this.lastError ? ` (${this.lastError})` : "";
+        return this.relayFailed(`cc-remote: could not reconnect to the host${why}; this claude is gone, and the next message resumes the session`);
+      }
+      if (wait) await this.sleep(wait);
+      if (this.done) return;
+      const child = this.spawn(relay.attach());
+      const r = await this.connection(child, { token: relay.token });
+      // One that came up and dropped at once asked for a reconnect while this one still ran.
+      if (r === "up" && this.conn !== child) continue;
+      if (r === "up") {
+        this.reconnecting = false;
+        if (!this.stopping) process.stderr.write("cc-remote: reconnected\n");
+        return;
+      }
+      if (r === "gone") {
+        return this.relayFailed("cc-remote: claude on the host is gone (the host restarted, or the session was taken up elsewhere); the next message resumes the session");
+      }
+    }
+  }
+
+  private sleep(ms: number): Promise<void> {
+    return new Promise((done) => {
+      const wake = () => {
+        clearTimeout(timer);
+        this.wakers.delete(wake);
+        done();
+      };
+      const timer = setTimeout(wake, ms);
+      this.wakers.add(wake);
+    });
+  }
+
+  private relayFailed(message: string) {
+    if (this.done) return;
+    // Asked to stop, it reports the stop, as a session that got there would.
+    if (this.killed) return this.endRelay(null, this.stopSignal, true);
+    process.stderr.write(`${message}\n`);
+    this.endRelay(255, null);
+  }
+
+  /**
+   * The end of a session under the relay: everything it wrote is out, its timers and connection
+   * go; at once when `abandon`, since nothing more will come over it.
+   */
+  private endRelay(code: number | null, signal: NodeJS.Signals | null, abandon = false) {
+    if (this.done) return;
+    for (const t of this.timers) clearInterval(t);
+    clearTimeout(this.stopTimer);
+    for (const wake of [...this.wakers]) wake();
+    live.delete(this);
+    this.client?.failExecs(new Error("the session has ended"));
+    const conn = this.conn;
+    this.conn = undefined;
+    // After an exit the channel closes by itself, once the host has the bye.
+    if (conn && abandon) conn.kill("SIGKILL");
+    else if (conn) setTimeout(() => conn.kill("SIGKILL"), 5_000).unref();
+    this.stdout.end();
+    this.finish(code, signal);
+  }
+
   private fail(error: Error) {
     if (this.done) return;
     this.done = true;
@@ -272,6 +596,7 @@ export class HostProcess extends EventEmitter {
   private finish(code: number | null, signal: NodeJS.Signals | null) {
     if (this.done) return;
     this.done = true;
+    clearTimeout(this.stopTimer);
     this.exitCode = code;
     this.signalCode = signal;
     if (!this.started) this.stdout.end();

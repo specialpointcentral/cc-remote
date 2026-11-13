@@ -33,8 +33,9 @@ It can also stand in for the `claude` executable of apps that embed the Claude A
   dependencies, your git config and your build tools.
 - **Your local MCP servers come along.** The ones your editor passes and the ones in your local
   Claude Code config run on your machine, OAuth logins included.
-- **Nothing to set up on the server.** No daemon, no port, no agent to install. If `ssh <your-server>
-  claude --version` works, cc-remote works.
+- **Nothing to set up on the server.** No service to install and no port to open: cc-remote copies
+  what it needs under `~/.cc-remote/` itself. If `ssh <your-server> claude --version` works,
+  cc-remote works.
 - **One binary locally, on macOS, Linux and Windows.** No `claude` install and no Claude login
   on your machine.
 - **It's real Claude Code.** cc-remote is
@@ -62,6 +63,8 @@ Before you start, have these two in place:
   put ports, users and jump hosts in `~/.ssh/config`).
 - **`claude` on the server is logged in.** Claude Code 2.1.268 or later, with a POSIX login shell.
   Run `claude` there once and log in, or use `cc-remote --cli auth login` after installing.
+
+`python3` 3.6 or later on the server is optional: with it, sessions survive a dropped connection.
 
 On your machine, cc-remote is a single binary with no dependencies; [Bun](https://bun.sh) is needed
 only to build it from source. It runs on macOS, Linux and Windows; on Windows it also needs the
@@ -130,8 +133,8 @@ If the server isn't logged in yet, run `cc-remote --cli auth login`.
    Server doesn't have. It offers to trust an unknown host key through OpenSSH's own prompt, to make
    a key for cc-remote and copy it with `ssh-copy-id` (the password goes to ssh), and to name that key
    in a managed block of `~/.ssh/config`, backed up first. A changed host key is never accepted.
-4. **Checking the server:** claude's version and login, permission mode auto, `~/.cc-remote`, and
-   sshd's limits and the account's resources. A missing, too old or logged-out claude stops setup with
+4. **Checking the server:** claude's version and login, permission mode auto, `~/.cc-remote`,
+   python3 (for reconnection), and sshd's limits and the account's resources. A missing, too old or logged-out claude stops setup with
    a hint: setup never installs, updates or logs in claude, and changes nothing on the server outside
    `~/.cc-remote`. Advice for the server's admin, such as sshd's `MaxSessions`, is printed, never
    applied.
@@ -358,6 +361,21 @@ there, which is the usual case, the session starts on a single ssh channel. Othe
 uploads only what is missing and starts again. Nothing your client sends is lost or repeated in
 between.
 
+**Dropped connections.** A session's claude survives a dropped ssh connection. When the server has
+`python3` 3.6 or later, cc-remote starts claude under a small relay it copies to `~/.cc-remote/bin/`
+there: it runs claude, keeps its output until your machine has it, and waits for cc-remote to come
+back. cc-remote sends a heartbeat every 10 seconds; when the link has been silent for 45 seconds
+(`CC_REMOTE_LINK_TIMEOUT`) or ssh exits, it reconnects on a connection of its own, at once and then
+every few seconds, and the stream goes on where it was. Nothing your client or claude sent is lost
+or repeated, so a turn in progress, a running Bash command or an open permission prompt just carries
+on. The server keeps claude for 30 minutes without a connection (`CC_REMOTE_RECONNECT_GRACE`, in
+seconds; `0` turns this off), then stops it. After that, or if the server restarted, the session
+ends as before and the next message resumes it. Stopping cc-remote or closing the chat stops claude
+on the server, and resuming a session stops any claude an earlier, lost cc-remote left running for
+it. Without python3 on the server, sessions start as before and cc-remote says once that they won't
+survive a dropped connection. While claude runs under the relay, the server's own files (plan file,
+memory, saved tool results) go over the session's connection instead of one ssh command each.
+
 **The server's claude.** Each session checks that the server's claude is at least the version in
 [Requirements](#requirements) and refuses to start otherwise. The version is remembered for ten
 minutes, so the version probes some apps make before every chat cost no ssh round trip;
@@ -383,10 +401,21 @@ the last session (`CC_REMOTE_CONTROL_PERSIST`, any `ControlPersist` value). The 
 compressed (`Compression=yes`), which helps on slow links. Every connection sends
 `ServerAliveInterval=15` and gives up after five minutes of silence (`CC_REMOTE_KEEPALIVE_TIMEOUT`,
 in seconds), so a short network drop doesn't end a chat and a dead link still fails instead of
-hanging. If an `-o` with the same name comes earlier in `CC_REMOTE_SSH`, that one is used instead.
+hanging. Connecting gives up after 20 seconds (`ConnectTimeout=20`), so an unreachable server fails
+quickly. `IPQoS=none` leaves the traffic's DSCP marking to the operating system: upstream OpenSSH
+marks sessions without a terminal, like these, as bulk traffic (`cs1`), which QoS networks and
+Wi-Fi put behind everything else. If an `-o` with the same name comes earlier in `CC_REMOTE_SSH`, that one is used instead.
 When the server refuses another session on the shared connection (sshd's `MaxSessions`, 10 by
 default), that session retries on a connection of its own. Windows' OpenSSH can't share
 connections, so there each session opens its own.
+
+Sessions under the relay notice a dead link sooner, through their own heartbeat. Reconnects use a
+connection of their own (`ControlPath=none`, `ConnectTimeout=10`, `BatchMode=yes`), so a shared
+connection stuck on a dead link can't hold them up. When a session's link goes silent, cc-remote also
+checks the shared connection with a quick `ssh <your-server> true`; if that doesn't answer, it stops
+taking new sessions (`ssh -O stop`), and new sessions open a fresh connection instead of hanging until
+the keepalives give up. Version probes that start together (Orca makes two for each new chat) share
+one ssh.
 
 **Windows.** The shell tool is PowerShell instead of Bash, as in Claude Code on Windows. cc-remote
 uses PowerShell 7 (`pwsh`) when it's on PATH, otherwise Windows PowerShell 5.1. Grep needs
@@ -402,6 +431,11 @@ like `C:\Users\me\app` gets the working folder `~/.cc-remote/ws/<your hostname>/
 - File checkpoints and rewind are recorded on the server, so they can't see your local edits.
 - Bridged MCP servers from your client expose their tools only, not resources or prompts.
 - LSP, Monitor and the worktree tools are turned off.
+- Reconnection needs `python3` 3.6 or later on the server. What claude writes to stderr while the
+  link is down is kept (up to 1 MiB) but can be lost if it was in flight when the link dropped; the
+  session's stream never is. On a server whose systemd-logind kills a user's processes when their ssh
+  session ends (`KillUserProcesses=yes`), claude can't outlive the connection.
+- One-off `claude -p` runs (such as Orca's chat titles) and `cc-remote --cli` don't reconnect.
 - Files claude keeps on the server for itself are reached by Read, Write, Edit and Glob only; Bash
   and Grep can't see them. The server's skills and plugins aren't reached this way: a skill that
   points at a file beside it finds your machine's copy, if any. A `plansDirectory` set in the
@@ -420,7 +454,7 @@ channel. A proxy on the stream renames the tools back to their built-in names, s
 renders diffs and terminals as usual. It also maps the server's paths to your local ones.
 
 claude-agent-acp is patched in one place (`patches/`): a hook that rewrites the `query()` options
-for each session. See [`PLAN.md`](PLAN.md) for the full design.
+for each session.
 
 Under Orca the SDK on the other end of the stream is Orca's, which knows nothing about cc-remote.
 `cc-remote claude` adjusts claude's command line the same way the options hook does, adds the local
@@ -442,4 +476,6 @@ bun run build                     # dist/cc-remote-{linux-x64,linux-arm64,darwin
 under a separate `HOME`. With `FAKE_HOST_ISOLATED=1` (Linux, unprivileged user namespaces) the
 fake server is a second machine as far as files go: its home, temp folder and claude's per-session
 folders are private to it, while the Claude login is shared. See the headers of
-`test/e2e/client.ts` and `test/e2e/fakessh`.
+`test/e2e/client.ts` and `test/e2e/fakessh`. `test/e2e/sdk.ts` stands in for an Agent SDK app such
+as Orca and breaks the link in the middle of a turn (a running Bash call, an open permission prompt,
+a frozen link) to show that the turn carries on; see its header.

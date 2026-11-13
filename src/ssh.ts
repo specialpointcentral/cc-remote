@@ -6,22 +6,36 @@ import { resolve } from "node:path";
 import { grantsSession } from "./grants";
 import { bundle, checkScript, installScript, type Need, type Ready, readyFields } from "./host-files";
 import { HostFiles } from "./host-fs";
-import { HostProcess } from "./host-process";
+import { HostProcess, type RelayPlan } from "./host-process";
 import { WINDOWS } from "./platform";
 import { projectTrees } from "./project-claude";
 import { proxy } from "./proxy";
+import { type ExecResult, RELAY_PATH, RELAY_SOURCE } from "./relay";
 import { localTranscript } from "./sessions";
-import { quote } from "./sh";
+import { quote, REMOTE_PATH } from "./sh";
 import type { Workspace } from "./tools/util";
-import { cachedVersion, rememberVersion, tooOld } from "./version";
+import { cachedVersion, rememberVersion, tooOld, versionOnce } from "./version";
 
-export { quote };
+export { quote, REMOTE_PATH };
 
 /** A positive whole number of seconds from the environment, or the default. */
 function seconds(value: string | undefined, fallback: number): number {
   const n = Number(value);
   return value && Number.isFinite(n) && n >= 1 ? Math.round(n) : fallback;
 }
+
+/**
+ * How long the host keeps a stream session's claude while no connection is attached, in seconds:
+ * CC_REMOTE_RECONNECT_GRACE, 30 minutes by default; 0 turns the relay off.
+ */
+export function reconnectGrace(): number {
+  const value = Bun.env.CC_REMOTE_RECONNECT_GRACE?.trim();
+  if (value === "0") return 0;
+  return seconds(value, 1800);
+}
+
+/** How long the relay's link may stay silent before it counts as dead: CC_REMOTE_LINK_TIMEOUT, 45 seconds by default. */
+export const linkTimeout = () => seconds(Bun.env.CC_REMOTE_LINK_TIMEOUT, 45);
 
 /**
  * Client keepalives: a probe every 15 seconds, and the link counts as dead after
@@ -40,8 +54,11 @@ const UNSHARED = ["-o", "ControlMaster=no", "-o", "ControlPath=none"];
 
 /**
  * The ssh command, like rsync's RSYNC_RSH: `CC_REMOTE_SSH="ssh -p 2222"`, plus compression (the
- * stream is JSON, and transcripts go up in it) and keepalives when that command is ssh. These are
- * passed on the command line, so nothing in ~/.ssh/config has to change. OpenSSH keeps the first
+ * stream is JSON, and transcripts go up in it), a 20-second connect timeout (an unreachable host
+ * would otherwise hang for minutes), no DSCP marking and keepalives when that command is ssh.
+ * Upstream OpenSSH marks sessions without a tty as bulk traffic (`IPQoS cs1`), which QoS networks
+ * and Wi-Fi's background queue put behind everything else; `IPQoS=none` leaves the operating
+ * system's default. These are passed on the command line, so nothing in ~/.ssh/config has to change. OpenSSH keeps the first
  * value it sees: an earlier `-o` in `CC_REMOTE_SSH` still wins, and these beat the config file.
  *
  * By default sessions share one connection, since an ACP client may open several at once and probe
@@ -50,8 +67,8 @@ const UNSHARED = ["-o", "ControlMaster=no", "-o", "ControlPath=none"];
  * has its own. Without `shared`, the command opens a connection of its own wherever it would
  * have shared one.
  */
-export const rsh = (shared = true) => {
-  const options = ["-o", "Compression=yes", ...keepalive()];
+export const rsh = (shared = true, extra: string[] = []) => {
+  const options = [...extra, "-o", "Compression=yes", "-o", "ConnectTimeout=20", "-o", "IPQoS=none", ...keepalive()];
   const custom = Bun.env.CC_REMOTE_SSH?.split(/\s+/).filter(Boolean);
   if (custom?.length) {
     if (!/^ssh(\.exe)?$/i.test(custom[0]!.split(/[\\/]/).pop()!)) return custom;
@@ -65,9 +82,6 @@ export const rsh = (shared = true) => {
   return ["ssh", "-o", "ControlMaster=auto", "-o", `ControlPath=${socket}`, "-o", `ControlPersist=${persist}`, ...options];
 };
 
-/** Native installs of claude live in ~/.local/bin, which non-interactive ssh shells often leave off PATH. */
-export const REMOTE_PATH = `PATH="$HOME/.local/bin:$PATH"`;
-
 /** A local path as a POSIX path for the host: `C:\Users\me` becomes `/C/Users/me`. */
 const posix = (path: string) => path.replaceAll("\\", "/").replace(/^([A-Za-z]):/, "/$1");
 
@@ -80,10 +94,59 @@ const enter = (cwd: string) => {
   return `mkdir -p ${dir} && cd ${dir}`;
 };
 
-/** The shell command the host runs: enter the folder, run `check` when given, then exec claude. */
-export function remoteCommand(args: string[], env: Record<string, string>, cwd: string, check?: string): string {
+/** How claude starts under the relay: the run folder's name and what the daemon is told. */
+export type RelayStart = { id: string; sessionId?: string; grace: number; idle: number };
+
+/**
+ * The shell command the host runs: enter the folder, run `check` when given, then exec claude.
+ * With `relay`, claude starts under the relay when the check found a python3 for it ($py).
+ */
+export function remoteCommand(args: string[], env: Record<string, string>, cwd: string, check?: string, relay?: RelayStart): string {
   const vars = Object.entries(env).map(([k, v]) => quote(`${k}=${v}`));
-  return `${enter(cwd)} && ${check ? `${check} && ` : ""}${REMOTE_PATH} exec env ${vars.join(" ")} claude ${args.map(quote).join(" ")}`;
+  const claude = `env ${vars.join(" ")} claude ${args.map(quote).join(" ")}`;
+  let start = `${REMOTE_PATH} exec ${claude}`;
+  if (relay) {
+    const session = relay.sessionId ? ` --session ${quote(relay.sessionId)}` : "";
+    const options = `${relay.id}${session} --grace ${relay.grace} --idle ${relay.idle}`;
+    start = `if [ -n "$py" ]; then ${REMOTE_PATH} exec "$py" -S "$HOME"/${quote(RELAY_PATH)} run ${options} -- ${claude}; else ${start}; fi`;
+  }
+  return `${enter(cwd)} && ${check ? `${check} && ` : ""}${start}`;
+}
+
+/** The shell command that attaches to a relay again: its line, then the relay's frames. */
+export function attachCommand(id: string, token: string): string {
+  return `py=$(${REMOTE_PATH} command -v python3) && printf '%s\\n' ${quote(token)} && exec "$py" -S "$HOME"/${quote(RELAY_PATH)} attach ${id}`;
+}
+
+/** Whether rsh() shares a connection that `ssh -O` can talk to. */
+const sharing = () => {
+  const custom = Bun.env.CC_REMOTE_SSH?.split(/\s+/).filter(Boolean);
+  return !WINDOWS && (!custom?.length || /^ssh(\.exe)?$/i.test(custom[0]!.split(/[\\/]/).pop()!));
+};
+
+const probing = new Set<string>();
+
+/**
+ * After a relay's link went silent: the shared connection is likely just as dead, and every new
+ * channel on it (a session start, a version probe) would hang until its keepalives give up, five
+ * minutes by default. If it doesn't run `true` within a few seconds, it stops taking new channels
+ * (`ssh -O stop`), so the next ssh opens a fresh connection. Sessions already on it keep it until
+ * they end: those under the relay reconnect on connections of their own, the others would have
+ * been stuck either way.
+ */
+export async function checkSharedConnection(host: string): Promise<void> {
+  if (!sharing() || probing.has(host)) return;
+  probing.add(host);
+  try {
+    const run = (args: string[], timeout: number) =>
+      Bun.spawn([...rsh(true), ...args], { stdin: "ignore", stdout: "ignore", stderr: "ignore", timeout, killSignal: "SIGKILL", windowsHide: true, env: process.env }).exited;
+    if ((await run(["-O", "check", host], 5_000)) !== 0) return;
+    if ((await run(["-o", "BatchMode=yes", "-T", host, "true"], 8_000)) === 0) return;
+    process.stderr.write(`cc-remote: the shared connection to ${host} is not answering; new sessions will open a fresh one\n`);
+    await run(["-O", "stop", host], 5_000);
+  } finally {
+    probing.delete(host);
+  }
 }
 
 /** Runs claude on the host with these arguments, for `cc-remote --cli`. */
@@ -99,13 +162,15 @@ export function runRemote(host: string, args: string[], cwd: string): Promise<nu
  * else asked over ssh and cached. Undefined when claude can't be run there.
  */
 export async function hostVersion(host: string, live = false): Promise<string | undefined> {
-  const cached = live ? undefined : cachedVersion(host);
-  if (cached) return cached;
-  const proc = Bun.spawn([...rsh(), "-T", host, `${REMOTE_PATH} claude --version`], { stdout: "pipe", stderr: "inherit", stdin: "ignore" });
-  const out = (await new Response(proc.stdout).text()).trim();
-  if ((await proc.exited) !== 0 || !out) return undefined;
-  rememberVersion(host, out);
-  return out;
+  const ask = async () => {
+    const proc = Bun.spawn([...rsh(), "-T", host, `${REMOTE_PATH} claude --version`], { stdout: "pipe", stderr: "inherit", stdin: "ignore", env: process.env });
+    const out = (await new Response(proc.stdout).text()).trim();
+    if ((await proc.exited) !== 0 || !out) return undefined;
+    rememberVersion(host, out);
+    return out;
+  };
+  if (live) return ask();
+  return cachedVersion(host) ?? versionOnce(host, ask);
 }
 
 /** A flag's value, written either as `--flag value` or as `--flag=value`, the SDK's usual form. */
@@ -117,6 +182,17 @@ export function argument(args: string[], ...names: string[]): string | undefined
     if (eq > 0 && names.includes(a.slice(0, eq))) return a.slice(eq + 1);
   }
   return undefined;
+}
+
+/** Runs a shell script on the host over a session's relay, for host-fs.ts. */
+export type Exec = (script: string, input?: Uint8Array) => Promise<ExecResult>;
+
+let told = false;
+/** Says once per process why sessions won't survive a dropped connection. */
+function notice(text: string) {
+  if (told) return;
+  told = true;
+  process.stderr.write(`cc-remote: ${text}\n`);
 }
 
 /** A local file or directory claude on the host needs a copy of, such as a plugin, and where it goes. */
@@ -186,10 +262,20 @@ function versionCheck(host: string): { refuse?: string; ask?: string; ready?: (r
  * skills and agents. The remote command checks for them first and starts claude only when they're
  * all there; otherwise cc-remote sends what's missing over one more channel and starts it again.
  * What the SDK writes in the meantime waits for the claude that starts. `found` gets what the check
- * reports about the host's folders, as claude starts.
+ * reports about the host's folders, as claude starts, and a way to run commands over the session's
+ * relay when it has one.
+ *
+ * A stream session (stream-json input, an SDK on the other end) starts claude under the relay,
+ * when the host has python3 and CC_REMOTE_RECONNECT_GRACE isn't 0: claude then survives a dropped
+ * connection, and cc-remote reconnects and goes on where the stream was.
  */
-export function launch(host: string, cwd: string, args: string[], env: Record<string, string>, uploads: Upload[] = [], signal?: AbortSignal, found?: (where: Ready) => void): HostProcess {
+export function launch(host: string, cwd: string, args: string[], env: Record<string, string>, uploads: Upload[] = [], signal?: AbortSignal, found?: (where: Ready, exec?: Exec) => void): HostProcess {
   const needs: Need[] = uploads.map((u) => ({ kind: "plugin", ...u }));
+  const grace = reconnectGrace();
+  const stream = argument(args, "--input-format") === "stream-json";
+  if (stream && !grace) notice("reconnection is off (CC_REMOTE_RECONNECT_GRACE=0): a dropped connection ends the session's claude");
+  const relayed = stream && grace > 0;
+  if (relayed) needs.push({ kind: "relay", remote: RELAY_PATH, data: RELAY_SOURCE });
   const resume = argument(args, "--resume", "-r");
   const transcript = resume ? localTranscript(resume, cwd) : undefined;
   if (resume && transcript) needs.push({ kind: "transcript", local: transcript, sessionId: resume });
@@ -201,11 +287,25 @@ export function launch(host: string, cwd: string, args: string[], env: Record<st
   const nonce = crypto.randomUUID();
   const tokens = { ready: `cc-remote-v1-ready-${nonce}`, missing: `cc-remote-v1-missing-${nonce}` };
   const version = versionCheck(host);
-  const check = checkScript(needs, !project.files.length, tokens, version.ask);
-  const command = remoteCommand(teamsOff(args, cwd), { ...env, ...NO_TEAMS }, cwd, check);
+  const sessionId = grantsSession(args);
+  const timeout = linkTimeout();
+  const start: RelayStart | undefined = relayed ? { id: nonce.replaceAll("-", "").slice(0, 20), sessionId, grace, idle: timeout + 15 } : undefined;
+  const check = checkScript(needs, !project.files.length, tokens, version.ask, start?.sessionId);
+  const command = remoteCommand(teamsOff(args, cwd), { ...env, ...NO_TEAMS }, cwd, check, start);
   const ssh = (shared: boolean) => [...rsh(shared), "-T", host];
+  const attach = `cc-remote-v1-attach-${nonce}`;
+  const relay: RelayPlan | undefined = start && {
+    // A connection of its own each time, which a stale shared one can't hold up, and which fails
+    // fast rather than ask for a password no one is there to type.
+    attach: () => [...rsh(false, ["-o", "ConnectTimeout=10", "-o", "BatchMode=yes"]), "-T", host, attachCommand(start.id, attach)],
+    token: attach,
+    pingMs: Math.min(10_000, (timeout * 1000) / 3),
+    linkTimeoutMs: timeout * 1000,
+    graceMs: grace * 1000,
+    silent: () => void checkSharedConnection(host),
+  };
 
-  return new HostProcess({
+  const child: HostProcess = new HostProcess({
     start: (shared) => [...ssh(shared), command],
     upload: (missing, shared) => {
       if (project.skipped.length && missing.some((i) => needs[i]!.kind === "project")) {
@@ -216,20 +316,23 @@ export function launch(host: string, cwd: string, args: string[], env: Record<st
     tokens,
     ready: (rest) => {
       const where = readyFields(rest);
-      found?.(where);
-      return version.ready?.(where.version);
+      if (relayed && !where.relay) notice(`${host} has no python3 3.6 or later, so a dropped connection ends the session's claude`);
+      found?.(where, where.relay ? (script, input) => child.exec(script, input) : undefined);
+      return { problem: version.ready?.(where.version), relay: where.relay };
     },
     refuse: version.refuse,
     signal,
+    relay,
   });
+  return child;
 }
 
 /** The host process where the proxy expects a ChildProcess: it uses only what both offer. */
 export const asChild = (host: HostProcess) => host as unknown as ChildProcess;
 
 /** Hands what a launch found about the host's folders to the local tools of the session in `ws`. */
-export const tellTools = (host: string, ws?: Workspace) => (where: Ready) => {
-  if (ws) ws.host = HostFiles.from(host, where);
+export const tellTools = (host: string, ws?: Workspace) => (where: Ready, exec?: Exec) => {
+  if (ws) ws.host = HostFiles.from(host, where, exec);
 };
 
 /**

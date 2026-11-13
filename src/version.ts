@@ -1,4 +1,4 @@
-import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { WINDOWS } from "./platform";
 import { home } from "./tools/util";
@@ -65,6 +65,38 @@ export function cachedVersion(host: string, now = Date.now()): string | undefine
     return format === FORMAT && typeof output === "string" && fresh ? output : undefined;
   } catch {
     return undefined;
+  }
+}
+
+/**
+ * The host's version for probes that start together, as Orca's two for each new chat do: the
+ * first takes the host's lock and asks, the others wait up to `waitMs` for what it remembers, then
+ * ask themselves. Without this, two probes on a host with no shared connection yet would each open
+ * a connection of their own.
+ */
+export async function versionOnce(host: string, ask: () => Promise<string | undefined>, waitMs = 4_000): Promise<string | undefined> {
+  const lock = `${file(host)}.lock`;
+  let held = false;
+  if (!disabled()) {
+    try {
+      mkdirSync(versionCache.dir, { recursive: true, mode: 0o700 });
+      // One left by a probe that was killed: the next one takes over.
+      if (existsSync(lock) && Date.now() - statSync(lock).mtimeMs > 15_000) rmSync(lock, { force: true });
+      closeSync(openSync(lock, "wx", 0o600));
+      held = true;
+    } catch {
+      for (const until = Date.now() + waitMs; Date.now() < until;) {
+        await Bun.sleep(25);
+        const hit = cachedVersion(host);
+        if (hit) return hit;
+        if (!existsSync(lock)) break;
+      }
+    }
+  }
+  try {
+    return cachedVersion(host) ?? (await ask());
+  } finally {
+    if (held) rmSync(lock, { force: true });
   }
 }
 

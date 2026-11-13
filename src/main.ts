@@ -8,6 +8,10 @@ import { basename, dirname, join } from "node:path";
 import pkg from "../package.json";
 import { runClaude } from "./auth-cache";
 import { claudeCompat } from "./claude";
+// Static imports: a dynamic import() makes the compiled bundle initialize zod out of order.
+import { main as setup } from "./setup/index";
+import { main as update } from "./update/index";
+import { refreshLatest, updateNotice } from "./update/notice";
 import { remote } from "./options";
 import { WINDOWS } from "./platform";
 import { hostVersion, quote, rsh } from "./ssh";
@@ -19,6 +23,8 @@ const USAGE = `Usage: cc-remote [--host <host>]
        cc-remote [--host <host>] --cli <claude arguments...>
        cc-remote [--host <host>] claude <claude arguments...>
        cc-remote [--host <host>] doctor
+       cc-remote setup [options]      (see cc-remote setup --help)
+       cc-remote update [options]     (see cc-remote update --help)
 
 Claude Code as an ACP agent, with the model on a remote host and the tools on this machine.
 Point an ACP client (Zed, paseo, ...) at \`cc-remote --host <host>\`.
@@ -30,6 +36,8 @@ Point an ACP client (Zed, paseo, ...) at \`cc-remote --host <host>\`.
                    Agent SDK, such as Orca: its tools run here, in the current directory.
                    Also what cc-remote does when it is run under the name \`claude\`
   doctor           check the connection and the remote claude version
+  setup            set up this machine, the host and Orca step by step; --check only verifies
+  update           install the latest release beside the current one and switch to it
   -v, --version    print the version
   -h, --help       print this help
 
@@ -44,11 +52,12 @@ const fail = (message: string): never => {
 };
 
 function parse(argv: string[]) {
-  const args = { host: undefined as string | undefined, cli: undefined as string[] | undefined, claude: undefined as string[] | undefined, doctor: false, version: false, help: false };
+  const args = { host: undefined as string | undefined, cli: undefined as string[] | undefined, claude: undefined as string[] | undefined, doctor: false, version: false, help: false, sub: undefined as { name: "setup" | "update"; argv: string[] } | undefined };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!;
     if (a === "--cli") { args.cli = argv.slice(i + 1); break; }
     if (a === "claude") { args.claude = argv.slice(i + 1); break; }
+    if (a === "setup" || a === "update") { args.sub = { name: a, argv: argv.slice(i + 1) }; break; }
     if (a === "--host") args.host = argv[++i] ?? fail("--host needs a value");
     else if (a.startsWith("--host=")) args.host = a.slice(7);
     else if (a === "doctor") args.doctor = true;
@@ -68,12 +77,17 @@ async function host(flag?: string): Promise<string> {
 async function doctor(target: string) {
   console.log(`cc-remote ${pkg.version} (claude-agent-acp ${acpPkg.version})`);
   console.log(`host: ${target} via ${rsh().join(" ")}`);
+  // Asked alongside the host, so the release check (at most two seconds, silent on failure) adds no wait.
+  const latest = refreshLatest().catch(() => {});
   // Always asked live; what it finds is what session starts go by for the next while.
   const out = (await hostVersion(target, true)) ?? fail(`could not run claude on ${target}`);
   console.log(`remote claude: ${out}`);
   const problem = tooOld(target, out);
   if (problem) fail(problem);
   console.log("ok");
+  await latest;
+  const notice = updateNotice(pkg.version);
+  if (notice) console.log(notice);
 }
 
 /**
@@ -133,7 +147,11 @@ process.emitWarning = ((warning: string | Error, ...rest: [{ code?: string }?]) 
 const asClaude = COMPILED && basename(process.argv0).replace(/\.exe$/i, "") === "claude";
 
 const args = asClaude ? { ...parse([]), claude: process.argv.slice(2) } : parse(process.argv.slice(2));
-if (args.claude) {
+if (args.sub) {
+  // Before host(): setup is how a host gets configured, and update needs none.
+  const main = args.sub.name === "setup" ? setup : update;
+  process.exit(await main(args.host && args.sub.name === "setup" ? ["--host", args.host, ...args.sub.argv] : args.sub.argv));
+} else if (args.claude) {
   const target = await host(args.host);
   process.on("exit", killAll);
   await claudeCompat(target, args.claude);

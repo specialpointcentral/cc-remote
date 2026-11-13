@@ -49,8 +49,16 @@ const FORMAT = 1;
 /** The same host through a different ssh command may be another machine. */
 const file = (host: string) => join(versionCache.dir, `claude-version-v${FORMAT}-${Bun.hash(`${host}\n${Bun.env.CC_REMOTE_SSH ?? ""}`).toString(36)}.json`);
 
+/**
+ * CC_REMOTE_NO_VERSION_CACHE=1 turns the cache off both ways, so every answer comes live from the
+ * host: for setup's end-to-end check, for `update` checking the host with a new version, and for
+ * debugging.
+ */
+const disabled = () => Bun.env.CC_REMOTE_NO_VERSION_CACHE === "1";
+
 /** What the host's claude printed for --version, if that was less than the TTL ago. */
 export function cachedVersion(host: string, now = Date.now()): string | undefined {
+  if (disabled()) return undefined;
   try {
     const { format, output, at } = JSON.parse(readFileSync(file(host), "utf8"));
     const fresh = typeof at === "number" && now - at >= 0 && now - at < versionCache.ttlMs;
@@ -62,7 +70,7 @@ export function cachedVersion(host: string, now = Date.now()): string | undefine
 
 /** Remembers what the host's claude printed for --version. A cache that can't be written is no cache. */
 export function rememberVersion(host: string, output: string, now = Date.now()) {
-  if (!versionNumber(output)) return;
+  if (!versionNumber(output) || disabled()) return;
   try {
     mkdirSync(versionCache.dir, { recursive: true, mode: 0o700 });
     const path = file(host);

@@ -1,7 +1,7 @@
-import type { HookCallbackMatcher, Options } from "@anthropic-ai/claude-agent-sdk";
+import type { Options } from "@anthropic-ai/claude-agent-sdk";
 import { bridgeAll } from "./bridge";
 import { localMcpServers } from "./mcp";
-import { LOCAL, PREFIX, READS, REMOVED, widenMatcher } from "./names";
+import { LOCAL, PREFIX, READS, REMOVED, widenHooks } from "./names";
 import { environment } from "./prompt";
 import { mirror } from "./sessions";
 import { spawner } from "./ssh";
@@ -17,16 +17,6 @@ function withEnvironment(prompt: SystemPrompt, env: string): SystemPrompt {
   if (Array.isArray(prompt)) return [...prompt, env];
   if (prompt.type === "preset") return { ...prompt, excludeDynamicSections: true, append: join(prompt.append, env) };
   return { ...prompt, prompt: Array.isArray(prompt.prompt) ? [...prompt.prompt, env] : join(prompt.prompt, env) };
-}
-
-function widenHooks(hooks: Options["hooks"]): Options["hooks"] {
-  if (!hooks) return hooks;
-  return Object.fromEntries(
-    Object.entries(hooks).map(([event, matchers]) => [
-      event,
-      (matchers as HookCallbackMatcher[]).map((m) => ({ ...m, matcher: widenMatcher(m.matcher) })),
-    ]),
-  );
 }
 
 /**

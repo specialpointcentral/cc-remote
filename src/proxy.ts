@@ -21,6 +21,17 @@ export type Session = {
   dirs?: string[];
 };
 
+/**
+ * More handling on the same stream, for when the SDK on the other end doesn't know about cc-remote:
+ * each returns the line to pass on, or null when it was taken care of here.
+ */
+export type Layer = {
+  /** A line from the SDK, after the rewriter. */
+  inbound(line: string): string | null;
+  /** A line from claude, after the rewriter. */
+  outbound(line: string): string | null;
+};
+
 const escape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const jsonText = (s: string) => JSON.stringify(s).slice(1, -1);
 
@@ -183,17 +194,25 @@ function lines(input: Readable, onLine: (line: string) => void, onEnd: () => voi
   createInterface({ input, crlfDelay: Infinity }).on("line", onLine).on("close", onEnd);
 }
 
-/** Wraps the ssh process so the SDK reads and writes through the rewriter. */
-export function proxy(child: ChildProcess, s: Session): SpawnedProcess {
+/**
+ * Wraps the ssh process so the SDK reads and writes through the rewriter, and through `layer`
+ * when given one; the layer gets the function that writes to claude.
+ */
+export function proxy(child: ChildProcess, s: Session, layer?: (toClaude: (line: string) => void) => Layer): SpawnedProcess {
   const { outbound, inbound } = rewriter(s);
   const stdin = new PassThrough();
   const stdout = new PassThrough();
   const toClaude = (line: string) => { if (child.stdin!.writable) child.stdin!.write(`${line}\n`); };
+  const extra = layer?.(toClaude);
   // claude going away shows up as the exit event; a write racing it must not crash us.
   child.stdin!.on("error", () => {});
-  lines(stdin, (line) => toClaude(inbound(line)), () => child.stdin!.end());
+  lines(stdin, (line) => {
+    const out = extra ? extra.inbound(inbound(line)) : inbound(line);
+    if (out !== null) toClaude(out);
+  }, () => child.stdin!.end());
   lines(child.stdout!, (line) => {
-    const out = outbound(line, toClaude);
+    let out = outbound(line, toClaude);
+    if (out !== null && extra) out = extra.outbound(out);
     if (out !== null) stdout.write(`${out}\n`);
   }, () => stdout.end());
 

@@ -8,7 +8,7 @@ cc-remote 让 Claude Code 跑在一台你能 ssh 上去的服务器上，而它�
 模型、登录状态和订阅都留在服务器；代码、shell、工具链和编辑器都留在你身边。
 
 它是一个 [ACP](https://agentclientprotocol.com) agent，可以直接接入终端里的 [acpc](https://github.com/AkaraChen/acpc)、Zed、paseo 以及任何 ACP 客户端。
-在编辑器看来，它就是 Claude Code。
+在编辑器看来，它就是 Claude Code。它还可以替代内嵌 Claude Agent SDK 的应用（例如 [Orca](#orca)）所调用的 `claude` 可执行文件。
 
 ```
   本机                                           服务器
@@ -131,12 +131,55 @@ paseo 还有一个插件，在 [`paseo-plugin/`](paseo-plugin)。可以装插件
 paseo plugin install github:AkaraChen/cc-remote:paseo-plugin
 ```
 
+### Orca
+
+[Orca](https://github.com/stablyai/orca) 不能添加 ACP agent，但它的 Claude 对话会运行 **Claude Command**
+所指定的可执行文件，并像 Claude Agent SDK 对待 `claude` 那样与之通信。`cc-remote claude` 就替代这个
+可执行文件：模型跑在服务器上，Read、Write、Edit、Bash、Glob 和 Grep 在运行 Orca Server 的机器上、
+对话所在的文件夹里执行。有多台项目机器时，每台都运行 Orca Server 和 cc-remote，共用同一台已登录
+`claude` 的服务器。
+
+在每台项目机器上（运行 Orca Server、存放文件的那台）：
+
+1. 按[安装](#安装)一节安装 cc-remote，写好主机文件，并运行 `cc-remote doctor`。
+   Orca Server 不读取你的 shell 配置文件，所以请用主机文件，而不是 `$CC_REMOTE_HOST`。
+2. 把 Orca 的 Claude Command（在 Claude agent 的设置里）设为 cc-remote 的完整路径，后面加上 `claude`：
+
+   ```
+   /home/me/.bun/bin/cc-remote claude
+   ```
+
+   `command -v cc-remote` 会输出这个路径。如果想在这里指定服务器而不是用主机文件，就在 `claude`
+   前加上 `--host <your-server>`。需要 `CC_REMOTE_SSH` 的话，把它加到 Orca 里 Claude agent 的环境变量中。
+3. 新开一个 Claude 对话。权限确认、工具卡片和 diff 都和本地 Claude 一样。
+
+Orca 新对话默认的权限模式是 full-access，这时 Bash 会在项目机器上直接执行，不经询问。建议在 Orca
+设置里把默认模式改成 auto。即使在 full-access 下，settings 里的 deny 规则仍会拒绝，ask 规则仍会弹出卡片。
+Orca 只提供"本次会话允许"，没有"总是允许"；需要长期生效的授权请写进 `.claude/settings.local.json`。
+在 Orca 里切换对话的模式或模型时，Orca 会重启 claude，这个对话里"本次会话允许"的授权也会随之清空。
+
+每个对话的记录都会镜像到项目机器上的 `~/.claude/projects/`，Orca 从那里读取，所以历史记录、追问，
+以及 Orca Server 重启后恢复对话都能正常工作。Orca 自带的对话插件（内嵌可视化）会在第一次需要时
+复制到服务器的 `~/.cc-remote/plugins/` 下。如果某个应用只接受一个路径、不能带参数，可以建一个名为
+`claude`、指向 cc-remote 可执行文件的链接，它的作用和 `cc-remote claude` 一样。不要把这个链接放进
+`PATH`，以免遮住本地的 `claude`。
+
+在[通用限制](#限制)之外，Orca 还有这些限制：
+
+- 对话总是使用服务器上的 Claude 登录。Orca 的账号切换改变不了这一点，所以请用 Orca 的系统账号；
+  选了托管账号时，对话记录会写到该账号的目录，但登录仍然是服务器的。
+- Orca 一次性的 `claude -p` 调用（例如给对话起名）在服务器上运行，不带任何工具。
+- Orca 终端面板里的 Claude 也用这个命令，cc-remote 会拒绝它：交互式的 `claude` 会在服务器的
+  文件夹里工作，而不是你的项目。请用 Orca 的对话，或在终端里用 acpc。
+- Orca 的 agent 状态钩子装在项目机器的 Claude 设置里，服务器上的 `claude` 不会读取它们。
+
 ### 命令
 
 ```
-cc-remote [--host <host>]                  在 stdio 上提供 ACP（客户端运行的就是这个）
-cc-remote [--host <host>] doctor           检查 ssh 和远端 claude 的版本
-cc-remote [--host <host>] --cli <args...>  在服务器上运行 `claude <args...>`
+cc-remote [--host <host>]                    在 stdio 上提供 ACP（客户端运行的就是这个）
+cc-remote [--host <host>] doctor             检查 ssh 和远端 claude 的版本
+cc-remote [--host <host>] --cli <args...>    在服务器上运行 `claude <args...>`
+cc-remote [--host <host>] claude <args...>   在内嵌 Agent SDK 的应用（如 Orca）里替代 `claude`
 cc-remote --version | --help
 ```
 
@@ -226,6 +269,11 @@ cc-remote 通过 `ssh -T` 启动 `claude`，于是同一条数据流就跨过了
 
 claude-agent-acp 只打了一处补丁（`patches/`）：一个改写每个会话 `query()` 选项的钩子。
 完整设计见 [`PLAN.md`](PLAN.md)。
+
+在 Orca 下，数据流另一端是 Orca 自己的 SDK，它对 cc-remote 一无所知。`cc-remote claude` 会像选项钩子
+那样调整 claude 的命令行，把本地工具加进 SDK 的 `initialize` 请求，并自己应答 claude 对这些工具的请求，
+这些请求不会到达 Orca。它还会打开 claude 的会话记录镜像，并把镜像写到本地。数据流上的其他内容，
+包括 Orca 自己的工具和权限确认，都照常经过同一个代理。
 
 ## 开发
 

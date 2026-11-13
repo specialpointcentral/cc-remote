@@ -10,7 +10,7 @@ import { REMOVED } from "../src/names";
 import { mirrorKey, projectKey, projectsDir, writeMirror } from "../src/sessions";
 import { argument, hostDir } from "../src/ssh";
 import { localTools } from "../src/tools";
-import { fakeHost } from "./fakehost";
+import { fakeHost, TEAMS_OFF } from "./fakehost";
 
 const dir = mkdtempSync(join(tmpdir(), "cc-remote-claude-"));
 const savedConfigDir = Bun.env.CLAUDE_CONFIG_DIR;
@@ -264,7 +264,7 @@ describe("cc-remote claude", () => {
     host.reset();
     const out = run("-p", "--add-dir", "/local/only", "--output-format", "text");
     expect(out.exitCode).toBe(0);
-    expect(out.stdout.toString()).toBe(`ARGS [-p] [--output-format] [text] [--disallowedTools=${REMOVED.join(",")}]\nTEAMS=0\n`);
+    expect(out.stdout.toString()).toBe(`ARGS [-p] [--output-format] [text] [--disallowedTools=${REMOVED.join(",")}]${TEAMS_OFF}\nTEAMS=0\n`);
     const [remote, ...more] = host.calls();
     expect(more).toEqual([]);
     expect(remote).toContain("'CLAUDE_CODE_FROM_SDK=1'");

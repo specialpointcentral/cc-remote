@@ -28,11 +28,25 @@ export const read = (ws: Workspace) => tool(
     limit: z.number().int().optional().describe("The number of lines to read. Only provide if the file is too large to read at once."),
   },
   async ({ file_path, offset, limit }) => {
-    const path = abs(ws, file_path);
-    const file = Bun.file(path);
-    const info = await file.stat().catch(() => null);
-    if (!info) return err(`File does not exist: ${path}`);
-    if (info.isDirectory()) return err(`EISDIR: illegal operation on a directory, read '${path}'`);
+    const remote = ws.host?.own(file_path);
+    let path: string;
+    let file: Blob;
+    if (remote && ws.host) {
+      // One of the host claude's own files, such as a tool result it saved there.
+      const got = await ws.host.read(remote).catch((e: Error) => e);
+      if (got instanceof Error) return err(got.message);
+      if (got === "missing") return err(`File does not exist: ${remote}`);
+      if (got === "directory") return err(`EISDIR: illegal operation on a directory, read '${remote}'`);
+      path = remote;
+      file = new Blob([got]);
+    } else {
+      path = abs(ws, file_path);
+      const local = Bun.file(path);
+      const info = await local.stat().catch(() => null);
+      if (!info) return err(`File does not exist: ${path}`);
+      if (info.isDirectory()) return err(`EISDIR: illegal operation on a directory, read '${path}'`);
+      file = local;
+    }
 
     const ext = path.match(/\.([^./]+)$/)?.[1]?.toLowerCase() ?? "";
     if (IMAGES[ext]) {

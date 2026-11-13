@@ -1,14 +1,14 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { checkScript, missingIn } from "../src/host-files";
+import { checkScript, missingIn, readyFields } from "../src/host-files";
 import type { HostProcess } from "../src/host-process";
 import { projectKey } from "../src/sessions";
-import { hostDir, launch, rsh, spawner, type Upload } from "../src/ssh";
+import { hostDir, launch, rsh, spawner, teamsOff, type Upload } from "../src/ssh";
 import { archive } from "../src/tar";
 import { cachedVersion, MIN_CLAUDE, older, rememberVersion, tooOld, versionCache } from "../src/version";
-import { fakeHost } from "./fakehost";
+import { fakeHost, TEAMS_OFF } from "./fakehost";
 
 const dir = mkdtempSync(join(tmpdir(), "cc-remote-launch-"));
 const host = fakeHost(dir);
@@ -89,7 +89,7 @@ describe("launch", () => {
     expect(r.code).toBe(0);
     expect(r.channels).toBe(1);
     expect(host.calls()).toHaveLength(1);
-    expect(r.out).toBe("ARGS [--model] [x y]\nTEAMS=0\nhello\n");
+    expect(r.out).toBe(`ARGS [--model] [x y]${TEAMS_OFF}\nTEAMS=0\nhello\n`);
     expect(r.err).toBe("");
     // That start also asked for the version, which the next ones take from the cache.
     expect(cachedVersion("box")).toBe("2.1.323 (Claude Code)");
@@ -117,7 +117,7 @@ describe("launch", () => {
     const first = await run(cwd, ["--plugin-dir=x"], { uploads, input: '{"type":"control_request"}\n' });
     expect(first.code).toBe(0);
     expect(first.channels).toBe(3);
-    expect(first.out).toBe('ARGS [--plugin-dir=x]\nTEAMS=0\n{"type":"control_request"}\n');
+    expect(first.out).toBe(`ARGS [--plugin-dir=x]${TEAMS_OFF}\nTEAMS=0\n{"type":"control_request"}\n`);
     expect(first.err).toBe("");
     expect(readFileSync(join(host.home, uploads[0]!.remote, ".claude-plugin", "plugin.json"), "utf8")).toBe('{"name":"p"}');
     expect(readFileSync(join(host.home, uploads[0]!.remote, "skills", "x", "SKILL.md"), "utf8")).toBe("skill");
@@ -127,7 +127,7 @@ describe("launch", () => {
 
     const second = await run(cwd, ["--plugin-dir=x"], { uploads });
     expect(second.channels).toBe(1);
-    expect(second.out).toBe("ARGS [--plugin-dir=x]\nTEAMS=0\nhello\n");
+    expect(second.out).toBe(`ARGS [--plugin-dir=x]${TEAMS_OFF}\nTEAMS=0\nhello\n`);
   });
 
   test("resumes a session the host has never seen, putting its transcript where claude looks", async () => {
@@ -192,7 +192,7 @@ describe("launch", () => {
       return { code, out, channels: child.channels };
     };
     const runs = await Promise.all([start(), start(), start()]);
-    for (const r of runs) expect(r).toEqual({ code: 0, out: "ARGS\nTEAMS=0\nhi\n", channels: 3 });
+    for (const r of runs) expect(r).toEqual({ code: 0, out: `ARGS${TEAMS_OFF}\nTEAMS=0\nhi\n`, channels: 3 });
     expect(readdirSync(onHost(cwd, ".claude", "skills"))).toEqual(["s"]);
     expect(readdirSync(join(host.home, uploads[0]!.remote))).toEqual(["skills"]);
     expect(existsSync(join(host.home, ".cc-remote", ".install-lock"))).toBe(false);
@@ -223,7 +223,7 @@ describe("launch", () => {
     put(join(cwd, ".claude", "agents", "a.md"), "agent");
     const r = await run(cwd, []);
     expect(r.code).toBe(0);
-    expect(r.out).toBe("ARGS\nTEAMS=0\nhello\n");
+    expect(r.out).toBe(`ARGS${TEAMS_OFF}\nTEAMS=0\nhello\n`);
     expect(r.err).toBe("");
     // Refused, then missing, upload, start: all after the first on a connection of their own.
     const calls = host.calls();
@@ -235,7 +235,7 @@ describe("launch", () => {
   test("what the host prints before claude starts goes to stderr, never to the SDK", async () => {
     Bun.env.FAKE_NOISE = "1";
     const r = await run(project(), []);
-    expect(r.out).toBe("ARGS\nTEAMS=0\nhello\n");
+    expect(r.out).toBe(`ARGS${TEAMS_OFF}\nTEAMS=0\nhello\n`);
     expect(r.err).toContain("welcome to the host\n");
     expect(r.err).toContain("a login warning\n");
     expect(r.err).not.toContain("cc-remote-ready");
@@ -321,9 +321,39 @@ describe("the check", () => {
     expect(r.stdout.toString()).toBe("");
     expect(missingIn(r.stderr.toString().trim(), tokens)).toEqual([1]);
     mkdirSync(join(home, ".cc-remote", "plugins", "b"));
-    const ok = Bun.spawnSync(["sh", "-c", `${script} && echo claude`], { env: { HOME: home, PATH: Bun.env.PATH! } });
-    expect(ok.stdout.toString()).toBe("READY-x\nclaude\n");
-    expect(missingIn("READY-x", tokens)).toBeUndefined();
+    const ok = Bun.spawnSync(["sh", "-c", `${script} && echo claude`], { cwd: home, env: { HOME: home, PATH: Bun.env.PATH! } });
+    const [ready, after] = ok.stdout.toString().split("\n");
+    expect(after).toBe("claude");
+    expect(missingIn(ready!, tokens)).toBeUndefined();
+    // The ready line says where the host's claude keeps its files.
+    expect(ready).toStartWith("READY-x\t");
+    expect(readyFields(ready!.slice("READY-x".length))).toEqual({ home, config: join(home, ".claude"), folder: realpathSync(home), version: "" });
+  });
+
+  test("the ready line carries claude's config folder and version when asked", () => {
+    const tokens = { ready: "READY-y", missing: "MISSING-y" };
+    const script = checkScript([], false, tokens, "echo '2.1.323 (Claude Code)'");
+    const home = mkdtempSync(join(dir, "check-"));
+    const r = Bun.spawnSync(["sh", "-c", script], { cwd: home, env: { HOME: home, CLAUDE_CONFIG_DIR: "/etc/claude config", PATH: Bun.env.PATH! } });
+    const line = r.stdout.toString().trim();
+    expect(readyFields(line.slice("READY-y".length))).toEqual({ home, config: "/etc/claude config", folder: realpathSync(home), version: "2.1.323 (Claude Code)" });
+  });
+});
+
+describe("teamsOff", () => {
+  const off = { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "0" };
+  test("merges agent teams off into the caller's settings, last, and drops --agent-teams", () => {
+    expect(teamsOff(["--model", "x"], dir)).toEqual(["--model", "x", "--settings", JSON.stringify({ env: off })]);
+    expect(teamsOff(["--agent-teams", "--settings", '{"fastMode":false}', "--verbose"], dir))
+      .toEqual(["--verbose", "--settings", JSON.stringify({ fastMode: false, env: off })]);
+    // The caller's own env stays, and its teams setting loses; repeated flags become one.
+    expect(teamsOff(['--settings={"env":{"A":"1","CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS":"1"}}', "-p", "--settings", '{"model":"m"}'], dir))
+      .toEqual(["-p", "--settings", JSON.stringify({ env: { A: "1", ...off }, model: "m" })]);
+    // A local settings file is read here, since the host can't; anything else is left as it was.
+    const file = join(dir, "teams-settings.json");
+    writeFileSync(file, '{"permissions":{"allow":["Bash(ls)"]}}');
+    expect(teamsOff(["--settings", "teams-settings.json"], dir)).toEqual(["--settings", JSON.stringify({ permissions: { allow: ["Bash(ls)"] }, env: off })]);
+    expect(teamsOff(["--settings", "/nowhere.json"], dir)).toEqual(["--settings", "/nowhere.json", "--settings", JSON.stringify({ env: off })]);
   });
 });
 

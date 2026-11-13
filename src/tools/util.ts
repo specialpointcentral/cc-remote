@@ -1,10 +1,14 @@
 import { homedir } from "node:os";
 import { isAbsolute, resolve } from "node:path";
+import type { HostFiles } from "../host-fs";
 
 export const home = homedir();
 
-/** One session's directories: relative paths resolve against root; Bash's cwd follows its `cd`s. */
-export type Workspace = { root: string; cwd: string };
+/**
+ * One session's directories: relative paths resolve against root; Bash's cwd follows its `cd`s.
+ * `host` knows the host's own files (host-fs.ts) once the session's claude has started.
+ */
+export type Workspace = { root: string; cwd: string; host?: HostFiles };
 
 export const workspace = (root: string): Workspace => ({ root, cwd: root });
 

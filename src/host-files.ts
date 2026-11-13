@@ -43,11 +43,32 @@ export type Tokens = { ready: string; missing: string };
 export const MISSING_STATUS = 97;
 
 /**
+ * What the ready line says after its token, each field after a tab: where the host's claude keeps
+ * its own files, so the file tools can tell them from local ones (host-fs.ts), then claude's
+ * version when the start asked for it, else nothing.
+ */
+export type Ready = {
+  /** The host's $HOME. */
+  home: string;
+  /** claude's config folder there: $CLAUDE_CONFIG_DIR, else ~/.claude. */
+  config: string;
+  /** The host folder's real path, which claude names its project folders after. */
+  folder: string;
+  version: string;
+};
+
+/** The fields of a ready line, from what follows its token. */
+export function readyFields(rest: string): Ready {
+  const [, home = "", config = "", folder = "", version = ""] = rest.replace(/\r$/, "").split("\t");
+  return { home, config, folder, version: version.trim() };
+}
+
+/**
  * sh, run in the host folder ahead of claude: checks that the host has everything in `needs`, and
  * removes the host's copy of the project's trees when the project has none (`clear`). With all of
- * it there, it prints the ready line on stdout (with claude's version after the token when
- * `version` names the command that prints it) and goes on; otherwise it prints the missing line,
- * the indexes of what's missing, on stderr and exits with MISSING_STATUS.
+ * it there, it prints the ready line on stdout (see Ready; the version when `version` names the
+ * command that prints it) and goes on; otherwise it prints the missing line, the indexes of what's
+ * missing, on stderr and exits with MISSING_STATUS.
  */
 export function checkScript(needs: Need[], clear: boolean, tokens: Tokens, version?: string): string {
   const steps = ["m="];
@@ -55,7 +76,8 @@ export function checkScript(needs: Need[], clear: boolean, tokens: Tokens, versi
   needs.forEach((need, i) => steps.push(`{ ${present(need)} || m="$m ${i}"; }`));
   if (clear) steps.push(clearCommand());
   steps.push(`if [ -n "$m" ]; then printf '%s%s\\n' ${quote(tokens.missing)} "$m" >&2; exit ${MISSING_STATUS}; fi`);
-  steps.push(version ? `printf '%s %s\\n' ${quote(tokens.ready)} "$(${version} 2>/dev/null)"` : `printf '%s\\n' ${quote(tokens.ready)}`);
+  const fields = `"$HOME" "\${CLAUDE_CONFIG_DIR:-$HOME/.claude}" "$(pwd -P)" "${version ? `$(${version} 2>/dev/null)` : ""}"`;
+  steps.push(`printf '%s\\t%s\\t%s\\t%s\\t%s\\n' ${quote(tokens.ready)} ${fields}`);
   return steps.join(" && ");
 }
 

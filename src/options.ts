@@ -6,6 +6,7 @@ import { environment } from "./prompt";
 import { mirror } from "./sessions";
 import { spawner } from "./ssh";
 import { localTools } from "./tools";
+import { workspace } from "./tools/util";
 
 type SystemPrompt = Options["systemPrompt"];
 
@@ -29,14 +30,16 @@ export function remote(host: string) {
     const cwd = options.cwd ?? process.cwd();
     // Extra directories are local paths; the host has none of them. They go in the prompt instead.
     const [env, local] = await Promise.all([environment(cwd, options.additionalDirectories ?? []), localMcpServers(cwd)]);
+    // Shared by the tools and the stream: the shell's directory, and the host's own files.
+    const ws = workspace(cwd);
     return {
       ...options,
       pathToClaudeCodeExecutable: "claude",
-      spawnClaudeCodeProcess: spawner(host, cwd, { CLAUDE_CODE_DISABLE_CLAUDE_MDS: "1" }),
+      spawnClaudeCodeProcess: spawner(host, cwd, { CLAUDE_CODE_DISABLE_CLAUDE_MDS: "1" }, ws),
       additionalDirectories: [],
       systemPrompt: withEnvironment(options.systemPrompt, env),
       // The client's servers win over the config's: it chose them for this session.
-      mcpServers: { ...bridgeAll({ ...local, ...options.mcpServers }, cwd, options.abortController?.signal), cc: localTools(cwd) },
+      mcpServers: { ...bridgeAll({ ...local, ...options.mcpServers }, cwd, options.abortController?.signal), cc: localTools(ws) },
       toolAliases: { ...options.toolAliases, ...Object.fromEntries(LOCAL.map((t) => [t, PREFIX + t])) },
       disallowedTools: [...(options.disallowedTools ?? []), ...REMOVED],
       // claude asks before any MCP tool; it never asks before its own reads.

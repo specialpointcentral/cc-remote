@@ -1,6 +1,9 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
+/** How the fake claude prints the settings every launch adds, after the caller's arguments: agent teams off. */
+export const TEAMS_OFF = ' [--settings] [{"env":{"CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS":"0"}}]';
+
 /**
  * A host on this machine: an `ssh` that logs its arguments, drops the options and the host, and
  * runs the command with sh under a separate HOME, and a `claude` there that prints its arguments

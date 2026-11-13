@@ -3,11 +3,13 @@ import type { ChildProcess } from "node:child_process";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { PassThrough, type Readable } from "node:stream";
+import { loadGrants, saveGrants } from "./grants";
 import { EDITS, LOCAL, PREFIX, strip } from "./names";
 import { SHELL } from "./platform";
 import { HOOK_ID, policyHook, shellVerdict, withPolicyHook, workspaceEdit } from "./policy";
 import { type Destination, persistAllowRule, type ShellTool, TrackedSettingsError, type Verdict } from "./rules";
 import { projectKey, projectsDir } from "./sessions";
+import type { Workspace } from "./tools/util";
 
 /** What one claude process needs to have its messages read as if it ran in `cwd` on this machine. */
 export type Session = {
@@ -19,6 +21,10 @@ export type Session = {
   mode: string;
   /** Additional local directories that count as the workspace, as `--add-dir` ones do for claude. */
   dirs?: string[];
+  /** The workspace the session's local tools share: where the shell is now, and the host's own files. */
+  ws?: Workspace;
+  /** The session's id, once known: from the command line, else from claude's init message. */
+  sessionId?: string;
 };
 
 /**
@@ -61,14 +67,20 @@ const FILES: string[] = ["localSettings", "projectSettings", "userSettings"] sat
  * local edits under acceptEdits, and shell commands that the user's rules or this session's grants
  * decide. claude matches `Bash(...)` rules only on its own shell tools, so cc-remote keeps them:
  * "always allow" goes to the local settings file, as Claude Code's own does, and "allow for this
- * session" stays in memory for as long as this claude runs.
+ * session" stays with the session (grants.ts), also when another claude process takes it up.
  */
 export function rewriter(s: Session) {
   const hostPath = new RegExp(`(?:/[^"\\\\/\\s]+)*/${escape(jsonText(s.hostDir))}(?=["/\\\\\\s]|$)`, "g");
   const local = jsonText(s.cwd);
   const transcripts = join(projectsDir(), projectKey(s.cwd));
   /** This session's shell grants, as allow rules: `Bash(npm test:*)`. */
-  const grants = new Set<string>();
+  const grants = new Set<string>(s.sessionId ? loadGrants(s.sessionId, s.cwd) : []);
+  /** Takes up the session's saved grants, when claude names a session other than the one known. */
+  const session = (id: unknown) => {
+    if (typeof id !== "string" || !id || id === s.sessionId) return;
+    s.sessionId = id;
+    for (const g of loadGrants(id, s.cwd)) grants.add(g);
+  };
 
   /** An "always allow" for the shell goes to a settings file; a session grant, or a failed write, stays here. */
   function grant(ruleContent: string, destination: string) {
@@ -82,6 +94,7 @@ export function rewriter(s: Session) {
       }
     }
     grants.add(`${SHELL}(${ruleContent})`);
+    if (s.sessionId) saveGrants(s.sessionId, s.cwd, grants);
   }
 
   /** Returns the line for the SDK, or null when it was answered here; `reply` writes to claude. */
@@ -97,9 +110,11 @@ export function rewriter(s: Session) {
       }
     }
     if (text.includes('"permissionMode"')) {
-      // claude's init and status messages say which mode it is in, whoever changed it.
+      // claude's init and status messages say which mode it is in, whoever changed it, and the
+      // init which session it is.
       const m = JSON.parse(text);
       if (m.type === "system" && typeof m.permissionMode === "string") s.mode = m.permissionMode;
+      if (m.type === "system" && m.subtype === "init") session(m.session_id);
     }
     const answer = (request_id: string, response: unknown) => {
       reply(JSON.stringify({ type: "control_response", response: { subtype: "success", request_id, response } }));
@@ -110,7 +125,7 @@ export function rewriter(s: Session) {
       if (m.type === "control_request" && m.request?.subtype === "hook_callback" && m.request.callback_id === HOOK_ID) {
         const input = m.request.input;
         if (typeof input?.permission_mode === "string") s.mode = input.permission_mode;
-        return answer(m.request_id, policyHook(input, s.cwd, grants, s.dirs));
+        return answer(m.request_id, policyHook(input, s.cwd, grants, s.dirs, s.ws));
       }
     }
     if (text.includes('"can_use_tool"')) {
@@ -120,7 +135,10 @@ export function rewriter(s: Session) {
       // Asks that no stored grant may answer, such as a classifier's escalation, go to the user.
       const allow = () => (req.requires_user_interaction ? text : answer(m.request_id, { behavior: "allow", updatedInput: req.input }));
       if (EDITS.includes(req.tool_name)) {
-        const local = workspaceEdit(String(req.input?.file_path ?? req.input?.notebook_path ?? ""), s.cwd, s.dirs);
+        const target = String(req.input?.file_path ?? req.input?.notebook_path ?? "");
+        // The host claude's own plan or memory file, which it edits without asking in any mode.
+        if (req.tool_name !== "NotebookEdit" && s.ws?.host?.selfEdited(target)) return allow();
+        const local = workspaceEdit(target, s.cwd, s.dirs);
         if (local && s.mode === "acceptEdits") return allow();
         // As claude offers for its own edits: accept the rest of this session's edits.
         req.permission_suggestions = local ? [{ type: "setMode", mode: "acceptEdits", destination: "session" }] : undefined;
@@ -130,7 +148,7 @@ export function rewriter(s: Session) {
         const command = String(req.input?.command ?? "");
         let verdict: Verdict;
         try {
-          verdict = shellVerdict(command, s.mode, s.cwd, grants);
+          verdict = shellVerdict(command, s.mode, s.cwd, grants, s.dirs, s.ws?.cwd);
         } catch (e) {
           console.error(`cc-remote: could not check a command against the permission rules: ${(e as Error).message}`);
           verdict = { decision: "ask" };

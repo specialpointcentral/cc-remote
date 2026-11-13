@@ -1,12 +1,15 @@
 import { hostLaunch } from "./args";
+import { runClaude } from "./auth-cache";
 import { bridgeAll } from "./bridge";
 import { sdkHost } from "./control";
+import { grantsSession } from "./grants";
 import type { HostProcess } from "./host-process";
 import { localMcpServers } from "./mcp";
 import { environment } from "./prompt";
 import { proxy } from "./proxy";
-import { argument, asChild, hostDir, hostVersion, launch, runRemote } from "./ssh";
+import { argument, asChild, hostDir, hostVersion, launch, runRemote, tellTools } from "./ssh";
 import { localTools } from "./tools";
+import { workspace } from "./tools/util";
 
 /**
  * What an app asks to find out which claude it has. The host's claude answers, as it would locally;
@@ -68,7 +71,7 @@ export async function claudeCompat(host: string, argv: string[]): Promise<void> 
   const stream = argument(argv, "--input-format") === "stream-json";
   if (!stream && !argv.includes("-p") && !argv.includes("--print")) {
     // claude's own subcommands, such as `auth status`, are about the host's claude: run them there.
-    if (argv[0] && !argv[0].startsWith("-")) process.exit(await runRemote(host, argv, cwd));
+    if (argv[0] && !argv[0].startsWith("-")) process.exit(await runClaude(host, argv, cwd));
     console.error(
       "cc-remote: `cc-remote claude` stands in for claude under an app that embeds the Claude Agent SDK, such as Orca's chats. " +
         "An interactive claude would work on the host's folder, not this machine's. Use an ACP client such as acpc here, " +
@@ -90,10 +93,12 @@ export async function claudeCompat(host: string, argv: string[]): Promise<void> 
   const [prompt, local] = await Promise.all([environment(cwd, plan.addDirs), plan.strictMcpConfig ? {} : localMcpServers(cwd)]);
   const closing = new AbortController();
   process.on("exit", () => closing.abort());
+  // Shared by the tools and the stream: the shell's directory, and the host's own files.
+  const ws = workspace(cwd);
   // The command line's servers win over the local config's, as the ACP client's do.
-  const servers = { ...bridgeAll({ ...local, ...plan.mcpServers }, cwd, closing.signal), cc: localTools(cwd) };
-  const child = launch(host, cwd, plan.args, { ...env, CLAUDE_CODE_DISABLE_CLAUDE_MDS: "1" }, plan.uploads);
-  const session = { cwd, hostDir: hostDir(cwd), mode: plan.mode, dirs: plan.addDirs };
+  const servers = { ...bridgeAll({ ...local, ...plan.mcpServers }, cwd, closing.signal), cc: localTools(ws) };
+  const child = launch(host, cwd, plan.args, { ...env, CLAUDE_CODE_DISABLE_CLAUDE_MDS: "1" }, plan.uploads, undefined, tellTools(host, ws));
+  const session = { cwd, hostDir: hostDir(cwd), mode: plan.mode, dirs: plan.addDirs, ws, sessionId: grantsSession(plan.args) };
   const sdk = proxy(asChild(child), session, (toClaude) => sdkHost(servers, prompt, toClaude));
   process.stdin.pipe(sdk.stdin);
   sdk.stdout.pipe(process.stdout);

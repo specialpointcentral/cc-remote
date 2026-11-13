@@ -6,6 +6,16 @@
 //     {"method":"session/prompt","params":{"sessionId":"$SESSION","prompt":[{"type":"text","text":"Read a.txt"}]}}]'
 //
 // AGENT runs a built binary instead of src/main.ts. Needs a logged-in claude on this machine.
+// FAKE_HOST_ISOLATED=1 runs the host as a second machine whose own files (its plans, transcripts,
+// spilled tool results, temp folder) this side can't see; see test/e2e/fakessh, and end it with
+// `test/e2e/fakessh --stop`. A plan mode run, which shows the plan the approval carries:
+//
+//   FAKE_HOST_ISOLATED=1 bun test/e2e/client.ts <cwd> '[{"method":"session/new","params":{"cwd":"$CWD","mcpServers":[]}},
+//     {"method":"session/set_mode","params":{"sessionId":"$SESSION","modeId":"plan"}},
+//     {"method":"session/prompt","params":{"sessionId":"$SESSION","prompt":[{"type":"text","text":"Plan ..., then call ExitPlanMode"}]}}]'
+//
+// Point XDG_CACHE_HOME at a scratch folder to keep the run's caches (version, auth status, session
+// approvals) out of ~/.cache/cc-remote.
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 
@@ -27,6 +37,10 @@ createInterface({ input: child.stdout }).on("line", (line) => {
   if (m.method === "session/request_permission") {
     const opt = m.params.options.find((o: any) => o.kind === (process.env.ALWAYS ? "allow_always" : "allow_once")) ?? m.params.options[0];
     console.log(`PERMISSION ${m.params.toolCall?.title} -> ${opt.optionId} of ${JSON.stringify(m.params.options.map((o: any) => o.kind + ":" + o.optionId))}`);
+    // What the user would read before answering, such as the plan of an ExitPlanMode.
+    const shown = (m.params.toolCall?.content ?? []).map((c: any) => c.content?.text ?? "").join("").trim();
+    if (shown) console.log(`  SHOWN ${JSON.stringify(shown.slice(0, 300))}`);
+    if (m.params.toolCall?.rawInput?.planFilePath !== undefined) console.log(`  PLAN_INPUT ${JSON.stringify(m.params.toolCall.rawInput.planFilePath)} ${JSON.stringify(m.params.toolCall.rawInput.plan ?? null).slice(0, 200)}`);
     return send({ id: m.id, result: { outcome: { outcome: "selected", optionId: opt.optionId } } });
   }
   if (m.method === "session/update") {

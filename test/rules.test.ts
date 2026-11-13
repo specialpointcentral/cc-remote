@@ -150,6 +150,31 @@ describe("Claude rules", () => {
     expect(evaluate("rm -rf ~", "auto", { ...rules, ask: ["Bash(rm:*)"] }, "Bash", cwd).decision).toBe("ask");
   });
 
+  test("relative removals resolve where the shell is now, and wherever the command's own cd may take it", () => {
+    const rules: Rules = { allow: ["Bash(rm:*)"], ask: [], deny: [] };
+    const root = join(base, "work", "app");
+    const verdict = (command: string, cwd = root) => evaluate(command, "auto", rules, "Bash", { root, cwd }).decision;
+    for (const command of ["cd / && rm -rf usr", "cd /; rm -rf etc", "cd / && rm -rf *", "(cd / && rm -rf usr)", "cd -P / && rm -rf usr", "pushd / && rm -rf usr",
+      "cd ~ && rm -rf .", "cd && rm -rf .", "cd .. && rm -rf app", "cd /usr && rm -rf ../etc", "bash -c 'cd / && rm -rf usr'", "cd / && bash -c 'rm -rf usr'",
+      "env -C / rm -rf usr", "sudo -D / rm -rf usr", "false && cd / ; rm -rf usr", "cd $HOME && rm -rf ."]) {
+      expect([command, verdict(command)]).toEqual([command, "deny"]);
+    }
+    // Somewhere not written out: any relative target may be critical there.
+    for (const command of ['cd "$DIR" && rm -rf build', "cd - && rm -rf build", "cd $(mktemp -d) && rm -rf x", "popd && rm -rf build", "cd ~other && rm -rf x", "cd * && rm -rf x"]) {
+      expect([command, verdict(command)]).toEqual([command, "deny"]);
+    }
+    expect(evaluate('cd "$DIR" && rm -rf build', "default", rules, "Bash", { root, cwd: root }).decision).toBe("ask");
+    // Absolute targets don't depend on it, and a cd that stays clear of critical paths is fine.
+    for (const command of ['cd "$DIR" && rm -rf /tmp/x/build', "cd build && rm -rf out", "cd /tmp/x && rm -rf build", "rm -rf build && cd /"]) {
+      expect([command, verdict(command)]).toEqual([command, "none"]);
+    }
+    // The shell's own directory: relative to it, and it and its parents are critical too.
+    expect(verdict("rm -rf usr", "/")).toBe("deny");
+    expect(verdict("rm -rf .", "/tmp/x/y")).toBe("deny");
+    expect(verdict("rm -rf ..", join(root, "src"))).toBe("deny");
+    expect(verdict("rm -rf build", "/tmp/x/y")).toBe("allow");
+  });
+
   test("deny rules can name a wrapper", () => {
     put(join(project, ".claude", "settings.json"), { permissions: { deny: ["Bash(sudo:*)", "Bash(command -v *)"] } });
     expect(claude("sudo -u root ls")[0]).toBe("deny");
@@ -289,7 +314,8 @@ describe("guard and hook", () => {
     expect(await decision("npm test", "dontAsk")).toBe("allow");
     expect(await decision("npm test", "auto")).toBe("allow");
     expect(await decision("npm test", "plan")).toBeUndefined();
-    expect(await ask("ls", "default")).toEqual({});
+    expect(await ask("make", "default")).toEqual({});
+    expect(await decision("git status", "plan")).toBe("allow");
   });
 });
 

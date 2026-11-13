@@ -1,7 +1,8 @@
 import { tool } from "@anthropic-ai/claude-agent-sdk";
 import { statSync } from "node:fs";
-import { isAbsolute, join } from "node:path";
+import { isAbsolute, join, posix } from "node:path";
 import { z } from "zod";
+import type { HostFiles } from "../host-fs";
 import { abs, bins, err, head, ok, streamLines, type Workspace } from "./util";
 
 const LIMIT = 100;
@@ -56,6 +57,27 @@ async function rgFiles(glob: string, cwd: string, skip: boolean, add: (file: str
   return code > 1 && !found ? ((await errors).trim() || `rg failed with exit code ${code}`) : undefined;
 }
 
+/** An absolute pattern as the folder its literal start names and the pattern below it; no folder for any other. */
+function splitAbsolute(pattern: string): [string | undefined, string] {
+  if (!pattern.startsWith("/")) return [undefined, pattern];
+  const parts = pattern.split("/");
+  const wild = parts.findIndex((p) => /[*?[{]/.test(p));
+  if (wild < 1) return [undefined, pattern];
+  return [parts.slice(0, wild).join("/") || "/", parts.slice(wild).join("/")];
+}
+
+/** A folder of the host claude's own, such as its memory: listed there, matched here, in name order. */
+async function hostGlob(host: HostFiles, dir: string, pattern: string) {
+  const listed = await host.list(dir).catch((e: Error) => e);
+  if (listed instanceof Error) return err(listed.message);
+  if (listed === "missing") return err(`Directory does not exist: ${dir}`);
+  const matcher = new Bun.Glob(pattern);
+  const files = listed.filter((f) => matcher.match(f)).map((f) => posix.join(dir, f));
+  if (!files.length) return ok("No files found");
+  const shown = files.slice(0, LIMIT).join("\n");
+  return ok(files.length > LIMIT ? `${shown}\n(Results are truncated. Consider using a more specific path or pattern.)` : shown);
+}
+
 export const glob = (ws: Workspace) => tool(
   "Glob",
   `Fast file pattern matching on the user's local filesystem.
@@ -69,6 +91,12 @@ export const glob = (ws: Workspace) => tool(
     path: z.string().optional().describe("The directory to search in. Defaults to the current working directory."),
   },
   async ({ pattern, path }) => {
+    if (ws.host) {
+      // A host folder given as the path, or as the literal start of an absolute pattern.
+      const [dir, rest] = path !== undefined ? [path, pattern] : splitAbsolute(pattern);
+      const remote = dir === undefined ? undefined : ws.host.own(dir);
+      if (remote) return hostGlob(ws.host, remote, rest);
+    }
     const cwd = abs(ws, path ?? ".");
     if (!statSync(cwd, { throwIfNoEntry: false })?.isDirectory()) return err(`Directory does not exist: ${cwd}`);
     const skip = !/\.git|node_modules/.test(pattern);

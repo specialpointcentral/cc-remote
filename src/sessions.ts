@@ -10,6 +10,11 @@ export function projectKey(cwd: string): string {
   let path = cwd;
   try { path = realpathSync(cwd); } catch {}
   if (process.platform === "darwin") path = path.normalize("NFC");
+  return keyFor(path);
+}
+
+/** The folder name for a real path, already resolved: also for a path on the host, which can't be resolved here. */
+export function keyFor(path: string): string {
   const name = path.replace(/[^a-zA-Z0-9]/g, "-");
   if (name.length <= 200) return name;
   let hash = 0;

@@ -173,8 +173,7 @@ Orca's default permission mode for new chats is full-access, where Bash runs on 
 without asking. Consider switching the default to auto in Orca's settings. Even in full-access,
 deny rules from your settings still refuse and ask rules still show a card. Orca offers "Allow for
 this session" but no "always allow"; put lasting approvals in `.claude/settings.local.json`. Orca
-restarts claude when you change a chat's mode or model, which also clears that chat's session
-approvals.
+restarts claude when you change a chat's mode or model; the chat's session approvals carry over.
 
 Each chat's transcript is mirrored to `~/.claude/projects/` on the project machine, where Orca reads
 it, so history, follow-ups and resuming a chat after Orca Server restarts work. Orca's built-in
@@ -223,14 +222,33 @@ plain single command in the default, accept-edits and don't-ask modes, and a nar
 command is split the way a shell would, so a rule also catches it behind `&&`, `|`, `$(…)` or
 wrappers such as `sudo` and `env`. Removing `/`, a top-level directory, your home or the project
 folder's parents (`rm`, `rmdir`) always asks, and in auto mode is refused; no rule approves it.
+A relative path counts from where the shell is, also after a `cd` in the same command; after a `cd`
+cc-remote can't follow (`cd "$DIR"`), every relative path counts as critical.
+
+Read-only commands run without asking in the default, accept-edits, plan and don't-ask modes, as
+Claude Code's own Bash runs them: `ls`, `cat`, `head`, `tail`, `wc`, `grep`/`rg`, `find` without
+`-exec`, `-delete` or `-fprint`, `git status`, `log`, `diff`, `show`, `branch` and the like, also in
+a pipeline or behind `&&`, with output only to `/dev/null`, and a `cd` only into the session's
+directories. The list is narrower than Claude Code's; anything else asks as before. In auto mode the
+classifier judges them.
 
 When a Bash command asks, the approval it offers is for a command prefix (such as `npm test:*`)
 rather than all of Bash. PowerShell commands on Windows work the same way. A command with `;`, `&`,
 `|`, redirects, `$(…)`, backticks or newlines is never approved by a prefix. "Don't ask again"
 writes `Bash(<prefix>:*)` to `.claude/settings.local.json` and, as Claude Code does, adds that file
 to your global git excludes the first time; if the file is tracked by git, the approval lasts for the
-session only. Approvals for the session last as long as that claude process. Subagents can't use
-`isolation: worktree`, since the worktree would be on the server.
+session only. Approvals for the session are kept with the session, in a private file under
+`~/.cache/cc-remote/grants/`, so a new claude for the same session (such as the one Orca starts when
+you change a chat's mode or model) still has them; a file unused for three days is removed.
+Subagents can't use `isolation: worktree`, since the worktree would be on the server.
+
+**The server's own files.** claude keeps some files on the server and has the model use them:
+plan mode's plan file (`~/.claude/plans/` there), the session's folder under `~/.claude/projects/`
+there (auto memory, a tool result too large for the context that claude saved to a file, subagent
+transcripts), subagent memory (`~/.claude/agent-memory/`) and background tasks' output. Read,
+Write, Edit and Glob open these on the server over the same ssh connection, so plan mode works as
+usual: the plan is written where ExitPlanMode reads it, and the approval shows it. As in Claude
+Code, writing the plan and memory files doesn't ask.
 
 **Shell.** Bash runs in your login shell's environment, so tools set up by your profile (conda, nvm,
 `module`, …) are found even when an app such as Orca starts cc-remote. With bash or zsh,
@@ -258,7 +276,10 @@ between.
 [Requirements](#requirements) and refuses to start otherwise. The version is remembered for ten
 minutes, so the version probes some apps make before every chat cost no ssh round trip;
 `cc-remote doctor` always asks the server. Agent teams are turned off, because teammates would run
-on the server without your machine's tools.
+on the server without your machine's tools. cc-remote also puts that in the settings claude starts
+with, so the server's own settings can't turn them on, and drops an `--agent-teams` flag.
+`claude auth status`, which claude-agent-acp asks several times as each session starts, is
+remembered per server for a minute; `cc-remote --cli auth login` or `logout` forgets it.
 
 **MCP servers.** Besides the servers your client passes, cc-remote starts the ones your local
 Claude Code would: user servers from `~/.claude.json`, the ones added for this directory, and the
@@ -295,8 +316,10 @@ like `C:\Users\me\app` gets the working folder `~/.cc-remote/ws/<your hostname>/
 - File checkpoints and rewind are recorded on the server, so they can't see your local edits.
 - Bridged MCP servers from your client expose their tools only, not resources or prompts.
 - LSP, Monitor and the worktree tools are turned off.
-- Read-only shell commands such as `ls` or `git status` ask in the default and plan modes, where
-  Claude Code's own Bash would run them without asking.
+- Files claude keeps on the server for itself are reached by Read, Write, Edit and Glob only; Bash
+  and Grep can't see them. The server's skills and plugins aren't reached this way: a skill that
+  points at a file beside it finds your machine's copy, if any. A `plansDirectory` set in the
+  server's settings isn't supported.
 
 ## How it works
 
@@ -330,4 +353,7 @@ bun run build                     # dist/cc-remote-{linux-x64,linux-arm64,darwin
 ```
 
 `test/e2e/` has a minimal ACP client and a fake ssh, which runs the "remote" side on this machine
-under a separate `HOME`. See the header of `test/e2e/client.ts` for usage.
+under a separate `HOME`. With `FAKE_HOST_ISOLATED=1` (Linux, unprivileged user namespaces) the
+fake server is a second machine as far as files go: its home, temp folder and claude's per-session
+folders are private to it, while the Claude login is shared. See the headers of
+`test/e2e/client.ts` and `test/e2e/fakessh`.

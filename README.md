@@ -155,9 +155,37 @@ cc-remote --version | --help
 
 **Permissions.** Permission requests go to your client, the same as with any ACP agent. Read, Glob
 and Grep never ask. "Accept edits" approves Write, Edit and NotebookEdit inside the session's
-directory. When a Bash command asks, the approval it offers is for a command prefix (such as
-`npm test:*`) rather than all of Bash. PowerShell commands on Windows work the same way. A command with `;`, `&`, `|`, redirects, `$(…)`, backticks
-or newlines is never approved automatically. Prefix approvals last until cc-remote exits.
+directories, except Claude Code's protected paths (`.git`, `.claude`, shell startup files,
+`.mcp.json`, …) and paths that leave the project through a symlink. In auto mode those same edits go
+ahead without a round trip to the classifier; everything else is judged by Claude's auto-mode
+classifier on the server, which sees the real command or file.
+
+Your machine's settings decide about local shell commands: the `Bash(...)` rules in the managed
+settings, `~/.claude/settings.json`, the project's `.claude/settings.json`, and
+`.claude/settings.local.json` (at the repository root, as Claude Code keeps it). The server's
+rules don't apply to them. A deny rule refuses the command before it runs, in every mode, bypass
+included; an ask rule always asks, even in bypass (Orca's full-access); an allow rule approves a
+plain single command in the default, accept-edits and don't-ask modes, and a narrow one in auto. A
+command is split the way a shell would, so a rule also catches it behind `&&`, `|`, `$(…)` or
+wrappers such as `sudo` and `env`. Removing `/`, a top-level directory, your home or the project
+folder's parents (`rm`, `rmdir`) always asks, and in auto mode is refused; no rule approves it.
+
+When a Bash command asks, the approval it offers is for a command prefix (such as `npm test:*`)
+rather than all of Bash. PowerShell commands on Windows work the same way. A command with `;`, `&`,
+`|`, redirects, `$(…)`, backticks or newlines is never approved by a prefix. "Don't ask again"
+writes `Bash(<prefix>:*)` to `.claude/settings.local.json` and, as Claude Code does, adds that file
+to your global git excludes the first time; if the file is tracked by git, the approval lasts for the
+session only. Approvals for the session last as long as that claude process. Subagents can't use
+`isolation: worktree`, since the worktree would be on the server.
+
+**Shell.** Bash runs in your login shell's environment, so tools set up by your profile (conda, nvm,
+`module`, …) are found even when an app such as Orca starts cc-remote. With bash or zsh,
+cc-remote captures that environment once and shares it between sessions, refreshing it after ten
+minutes or when a startup file changes; `CC_REMOTE_SHELL_SNAPSHOT=off` runs every command as a login
+shell instead. A command that times out or is stopped gets SIGTERM, and SIGKILL five seconds later.
+
+**Search.** With ripgrep installed, Glob honours your ignore files, as Grep does. Grep returns up to
+250 results by default (`head_limit: 0` for all of them) and stops searching once it has enough.
 
 **Sessions.** Each session is mirrored to `~/.claude/projects/` on your machine, in the same place
 a local Claude Code would keep it. Your client can list, replay, load and fork sessions from there.
@@ -213,6 +241,8 @@ like `C:\Users\me\app` gets the working folder `~/.cc-remote/ws/<your hostname>/
 - File checkpoints and rewind are recorded on the server, so they can't see your local edits.
 - Bridged MCP servers from your client expose their tools only, not resources or prompts.
 - LSP, Monitor and the worktree tools are turned off.
+- Read-only shell commands such as `ls` or `git status` ask in the default and plan modes, where
+  Claude Code's own Bash would run them without asking.
 
 ## How it works
 

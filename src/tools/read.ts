@@ -1,7 +1,10 @@
 import { tool } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import { renderNotebook } from "./notebook";
-import { abs, err, ok, type Workspace } from "./util";
+import { abs, err, ok, streamLines, type Workspace } from "./util";
+
+/** Longer lines are cut, as Claude Code's Read cuts them. */
+const MAX_LINE = 2000;
 
 const IMAGES: Record<string, string> = {
   png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp",
@@ -43,18 +46,22 @@ export const read = (ws: Workspace) => tool(
       }
     }
 
-    const lines = (await file.text()).split("\n");
-    if (lines.at(-1) === "") lines.pop();
-    if (lines.length === 0) return ok("<system-reminder>Warning: the file exists but the contents are empty.</system-reminder>");
-
+    // Only as far as the range needs: a line range of a large file doesn't load the whole file.
+    // The file is read to its end only to say how short it is, without keeping its lines.
     const start = Math.max(1, offset ?? 1);
-    if (start > lines.length) {
-      return ok(`<system-reminder>Warning: the file exists but is shorter than the provided offset (${start}). The file has ${lines.length} lines.</system-reminder>`);
+    const end = start - 1 + (limit ?? 2000);
+    const shown: string[] = [];
+    let lines = 0;
+    for await (const line of streamLines(file.stream(), MAX_LINE + 1)) {
+      lines++;
+      if (lines >= start && lines <= end) shown.push(`${String(lines).padStart(6)}\t${line.length > MAX_LINE ? `${line.slice(0, MAX_LINE)}…` : line}`);
+      if (lines >= Math.max(start, end)) break;
     }
-    const body = lines
-      .slice(start - 1, start - 1 + (limit ?? 2000))
-      .map((line, i) => `${String(start + i).padStart(6)}\t${line.length > 2000 ? `${line.slice(0, 2000)}…` : line}`)
-      .join("\n");
+    if (lines === 0) return ok("<system-reminder>Warning: the file exists but the contents are empty.</system-reminder>");
+    if (start > lines) {
+      return ok(`<system-reminder>Warning: the file exists but is shorter than the provided offset (${start}). The file has ${lines} lines.</system-reminder>`);
+    }
+    const body = shown.join("\n");
     return ok(body);
   },
   { annotations: { readOnlyHint: true } },

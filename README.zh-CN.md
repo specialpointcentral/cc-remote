@@ -143,9 +143,31 @@ cc-remote --version | --help
 ## 行为
 
 **权限。** 权限请求会发到你的客户端，和其他 ACP agent 一样。Read、Glob 和 Grep 从不询问。
-"Accept edits" 会批准会话目录内的 Write、Edit 和 NotebookEdit。Bash 命令需要确认时，提供的授权
-针对的是命令前缀（比如 `npm test:*`），而不是整个 Bash。Windows 上的 PowerShell 命令同理。
-含有 `;`、`&`、`|`、重定向、`$(…)`、反引号或换行的命令永远不会被自动批准。前缀授权在 cc-remote 退出前一直有效。
+"Accept edits" 会批准会话目录内的 Write、Edit 和 NotebookEdit，但 Claude Code 的受保护路径（`.git`、
+`.claude`、shell 启动文件、`.mcp.json` 等）和经符号链接跑到项目外的路径除外。在 auto 模式下，这些编辑
+直接放行，不必再去问分类器；其他操作由服务器上 Claude 的 auto 模式分类器判断，它看到的是真实的命令或文件。
+
+本地 shell 命令按你本机的 settings 判断：managed settings、`~/.claude/settings.json`、项目的
+`.claude/settings.json`，以及 `.claude/settings.local.json`（和 Claude Code 一样放在仓库根目录）里的
+`Bash(...)` 规则。服务器上的规则对它们不起作用。deny 规则会在命令执行前拒绝，任何模式都一样，包括 bypass；
+ask 规则总会询问，bypass（Orca 的 full-access）下也一样；allow 规则在默认、accept-edits 和 don't-ask
+模式下批准简单的单条命令，在 auto 模式下批准范围窄的规则。命令会像 shell 那样拆开，所以藏在 `&&`、`|`、
+`$(…)` 后面，或者套了 `sudo`、`env` 这类包装的命令也能匹配到规则。删除 `/`、顶层目录、你的 home 目录或
+项目目录的上级目录（`rm`、`rmdir`）总会询问，在 auto 模式下直接拒绝，任何规则都不能放行。
+
+Bash 命令需要确认时，提供的授权针对的是命令前缀（比如 `npm test:*`），而不是整个 Bash。Windows 上的
+PowerShell 命令同理。含有 `;`、`&`、`|`、重定向、`$(…)`、反引号或换行的命令永远不会被前缀授权放行。
+"不再询问"会把 `Bash(<前缀>:*)` 写进 `.claude/settings.local.json`，并像 Claude Code 一样在第一次写入时
+把这个文件加进全局 git 忽略列表；如果这个文件已被 git 跟踪，授权只在本次会话内有效。本次会话的授权
+在这个 claude 进程存在期间一直有效。子代理不能使用 `isolation: worktree`，因为 worktree 会建在服务器上。
+
+**Shell。** Bash 在你的登录 shell 环境里运行，所以即使是 Orca 这类应用拉起 cc-remote，profile 里配置的
+工具（conda、nvm、`module` 等）也找得到。用 bash 或 zsh 时，cc-remote 只抓取一次这个环境并在会话之间共享，
+十分钟后或启动文件变化时重新抓取；设 `CC_REMOTE_SHELL_SNAPSHOT=off` 则每条命令都以登录 shell 运行。
+命令超时或被停止时先收到 SIGTERM，五秒后再收到 SIGKILL。
+
+**搜索。** 装了 ripgrep 时，Glob 和 Grep 一样会遵守你的忽略文件。Grep 默认最多返回 250 条结果
+（`head_limit: 0` 返回全部），够数就停止搜索。
 
 **会话。** 每个会话都会镜像到本机的 `~/.claude/projects/`，也就是本地 Claude Code 存放会话的位置。
 客户端可以从那里列出、回放、加载和 fork 会话。如果恢复一个服务器没见过的会话（比如 fork 出来的），
@@ -190,6 +212,8 @@ PowerShell 7（`pwsh`）时用它，否则用 Windows PowerShell 5.1。Grep 需�
 - 文件检查点和回退记录在服务器上，因此看不到你本地的修改。
 - 从客户端桥接的 MCP 服务器只暴露工具，不暴露 resources 和 prompts。
 - LSP、Monitor 和 worktree 相关工具已关闭。
+- `ls`、`git status` 这类只读的 shell 命令在默认模式和 plan 模式下会询问，而 Claude Code 自己的 Bash
+  不会询问。
 
 ## 工作原理
 

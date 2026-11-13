@@ -1,5 +1,6 @@
-import { afterAll, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { snapshots } from "../src/tools/login";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { bash as makeBash } from "../src/tools/bash";
@@ -8,19 +9,23 @@ import { glob as makeGlob } from "../src/tools/glob";
 import { grep as makeGrep } from "../src/tools/grep";
 import { notebookEdit as makeNotebookEdit } from "../src/tools/notebook";
 import { read as makeRead } from "../src/tools/read";
-import { workspace } from "../src/tools/util";
+import { stopping } from "../src/tools/shell";
+import { bins, workspace } from "../src/tools/util";
 import { write as makeWrite } from "../src/tools/write";
+import { call, isolate } from "./fixture";
 
 const dir = mkdtempSync(join(tmpdir(), "cc-remote-test-"));
 const ws = workspace(dir);
 const [bash, edit, glob, grep, notebookEdit, read, write] = [makeBash, makeEdit, makeGlob, makeGrep, makeNotebookEdit, makeRead, makeWrite].map((t) => t(ws));
-afterAll(() => rmSync(dir, { recursive: true, force: true }));
-
-type Result = { content: { type: string; text?: string }[]; isError?: boolean };
-const call = async (t: { handler: (a: any, e: any) => Promise<unknown> }, input: object) => {
-  const r = (await t.handler(input, {})) as Result;
-  return { text: r.content.map((c) => c.text ?? `[${c.type}]`).join(""), error: !!r.isError };
-};
+let env: ReturnType<typeof isolate>;
+beforeAll(() => {
+  env = isolate();
+  snapshots.cacheDir = join(env.home, ".cache", "cc-remote", "shell");
+});
+afterAll(() => {
+  env.restore();
+  rmSync(dir, { recursive: true, force: true });
+});
 
 describe("Write and Read", () => {
   test("creates parent directories and reads back with line numbers", async () => {
@@ -37,6 +42,94 @@ describe("Write and Read", () => {
   test("returns images as image blocks", async () => {
     await Bun.write(join(dir, "x.png"), new Uint8Array([137, 80, 78, 71]));
     expect((await call(read, { file_path: join(dir, "x.png") })).text).toBe("[image]");
+  });
+});
+
+describe("Read line ranges", () => {
+  const file = join(dir, "lines.txt");
+  test("keeps Claude Code's numbering, cut long lines and messages for empty and short files", async () => {
+    await Bun.write(file, `one\n${"x".repeat(2500)}\nthree`);
+    expect((await call(read, { file_path: file })).text).toBe(`     1\tone\n     2\t${"x".repeat(2000)}…\n     3\tthree`);
+    expect((await call(read, { file_path: file, offset: 3 })).text).toBe("     3\tthree");
+    expect((await call(read, { file_path: file, offset: 9 })).text).toContain("shorter than the provided offset (9). The file has 3 lines.");
+    await Bun.write(file, "");
+    expect((await call(read, { file_path: file })).text).toContain("the contents are empty");
+    await Bun.write(file, "\n");
+    expect((await call(read, { file_path: file })).text).toBe("     1\t");
+  });
+  test("reads only as far as the range: a file that never ends still answers", async () => {
+    const fifo = join(dir, "endless");
+    Bun.spawnSync(["mkfifo", fifo]);
+    // The writer keeps its end open, so the file never reaches its end.
+    const holder = Bun.spawn(["sh", "-c", `exec 3>'${fifo}'; printf 'a\\nb\\nc\\n' >&3; sleep 30`], { stdout: "ignore" });
+    const started = Date.now();
+    expect((await call(read, { file_path: fifo, limit: 2 })).text).toBe("     1\ta\n     2\tb");
+    expect(Date.now() - started).toBeLessThan(5000);
+    holder.kill();
+  });
+});
+
+describe("Grep limits", () => {
+  const path = join(dir, "many");
+  beforeAll(async () => {
+    for (let i = 0; i < 300; i++) await Bun.write(join(path, `f${String(i).padStart(3, "0")}.txt`), "hit\n");
+  });
+  test("shows 250 results unless head_limit says otherwise, and offset pages through them", async () => {
+    const first = (await call(grep, { pattern: "hit", path })).text;
+    expect(first.split("\n")[0]).toBe("Found 250 files");
+    expect(first).toContain("Pass offset: 250");
+    const page = (await call(grep, { pattern: "hit", path, head_limit: 100, offset: 250 })).text;
+    expect(page.split("\n")[0]).toBe("Found 50 files");
+    expect(page).not.toContain("offset");
+    expect((await call(grep, { pattern: "hit", path, head_limit: 0 })).text.split("\n")[0]).toBe("Found 300 files");
+    expect((await call(grep, { pattern: "hit", path, output_mode: "count", head_limit: 2 })).text.split("\n").slice(0, 2).every((l) => l.endsWith(":1"))).toBe(true);
+  });
+  test("stops searching once it has what it shows", async () => {
+    const fifo = join(dir, "endless-matches");
+    Bun.spawnSync(["mkfifo", fifo]);
+    const holder = Bun.spawn(["sh", "-c", `exec 3>'${fifo}'; while :; do echo hit >&3 || exit; done`], { stdout: "ignore", stderr: "ignore" });
+    const started = Date.now();
+    const { text } = await call(grep, { pattern: "hit", path: fifo, output_mode: "content", "-n": false, head_limit: 3 });
+    expect(text.split("\n").slice(0, 3)).toEqual(["hit", "hit", "hit"]);
+    expect(Date.now() - started).toBeLessThan(5000);
+    holder.kill();
+  });
+});
+
+describe("Glob", () => {
+  const root = join(dir, "globbed");
+  beforeAll(async () => {
+    for (const f of ["top.ts", "a/x.ts", "a/b/y.ts", ".hidden/h.ts", "node_modules/n/i.ts", "skipped/s.ts"]) await Bun.write(join(root, f), "");
+    await Bun.write(join(root, ".gitignore"), "skipped/\n");
+    Bun.spawnSync(["git", "init", "-q"], { cwd: root });
+  });
+  // Both ways of listing, when ripgrep is installed: they agree on what a pattern means.
+  for (const [name, rg] of [["Bun.Glob", null], ...(bins.rg ? [["ripgrep", bins.rg]] : [])] as [string, string | null][]) {
+    test(`${name}: anchors a bare pattern at the directory, lists hidden files and skips node_modules`, async () => {
+      const saved = bins.rg;
+      bins.rg = rg;
+      try {
+        const list = async (pattern: string) => (await call(glob, { pattern, path: root })).text.split("\n").map((f) => f.slice(root.length + 1)).sort();
+        expect(await list("*.ts")).toEqual(["top.ts"]);
+        expect(await list("a/*.ts")).toEqual(["a/x.ts"]);
+        const all = await list("**/*.ts");
+        expect(all).toEqual(rg ? [".hidden/h.ts", "a/b/y.ts", "a/x.ts", "top.ts"] : [".hidden/h.ts", "a/b/y.ts", "a/x.ts", "skipped/s.ts", "top.ts"]);
+        expect(await list("node_modules/**/*.ts")).toEqual(["node_modules/n/i.ts"]);
+        expect((await call(glob, { pattern: "*.nothing", path: root })).text).toBe("No files found");
+      } finally {
+        bins.rg = saved;
+      }
+    });
+  }
+  test("keeps the newest 100", async () => {
+    const many = join(dir, "hundreds");
+    for (let i = 0; i < 150; i++) await Bun.write(join(many, `f${i}.txt`), "");
+    await Bun.sleep(20);
+    await Bun.write(join(many, "newest.txt"), "");
+    const lines = (await call(glob, { pattern: "*.txt", path: many })).text.split("\n");
+    expect(lines[0]).toBe(join(many, "newest.txt"));
+    expect(lines).toHaveLength(101);
+    expect(lines[100]).toContain("Results are truncated");
   });
 });
 
@@ -83,12 +176,59 @@ describe("Bash", () => {
     expect(await Bun.file(file).text()).toBe("bg-ok\n");
     const pid = Number(text.match(/ID: (\d+)/)![1]);
     process.kill(-pid, "SIGKILL");
+    rmSync(file, { force: true });
   });
   test("times out and does not wait for background children", async () => {
     const started = Date.now();
     expect((await call(bash, { command: "sleep 30", timeout: 1000 })).text).toContain("timed out");
     expect((await call(bash, { command: "sleep 30 & echo started" })).text).toBe("started");
     expect(Date.now() - started).toBeLessThan(5000);
+  });
+  test("stops a timed-out command with SIGTERM first, so it can clean up", async () => {
+    const { text, error } = await call(bash, { command: "trap 'echo cleaned-up; exit 3' TERM; sleep 30 & wait", timeout: 1000 });
+    expect(error).toBe(true);
+    expect(text).toBe("cleaned-up\nCommand timed out after 1000ms");
+  });
+  test("kills what ignores SIGTERM once the grace period ends", async () => {
+    const grace = stopping.graceMs;
+    stopping.graceMs = 300;
+    try {
+      const started = Date.now();
+      expect((await call(bash, { command: "trap '' TERM; sleep 30", timeout: 1000 })).text).toContain("timed out");
+      expect(Date.now() - started).toBeGreaterThanOrEqual(1300);
+      expect(Date.now() - started).toBeLessThan(4000);
+    } finally {
+      stopping.graceMs = grace;
+    }
+  });
+  test("an abort stops the command", async () => {
+    const abort = new AbortController();
+    setTimeout(() => abort.abort(), 300);
+    const started = Date.now();
+    await call(bash, { command: "sleep 30" }, { signal: abort.signal });
+    expect(Date.now() - started).toBeLessThan(3000);
+  });
+  test("refuses a command the user's deny rules cover, before it runs, in every mode", async () => {
+    const settings = join(env.home, ".claude", "settings.json");
+    mkdirSync(join(env.home, ".claude"), { recursive: true });
+    writeFileSync(settings, JSON.stringify({ permissions: { deny: ["Bash(rm:*)"] } }));
+    const victim = join(dir, "victim.txt");
+    writeFileSync(victim, "x");
+    try {
+      for (const command of [`rm ${victim}`, `echo ok && rm ${victim}`, `echo "$(rm ${victim})"`]) {
+        const { text, error } = await call(bash, { command });
+        expect(error).toBe(true);
+        expect(text).toContain("Bash(rm:*)");
+      }
+      expect((await call(bash, { command: `rm ${victim}`, run_in_background: true })).error).toBe(true);
+      expect(existsSync(victim)).toBe(true);
+      expect((await call(bash, { command: `echo rm ${victim}` })).error).toBe(false);
+    } finally {
+      rmSync(settings);
+    }
+    // The rules are read again once the file changes.
+    expect((await call(bash, { command: `rm ${victim}` })).error).toBe(false);
+    expect(existsSync(victim)).toBe(false);
   });
 });
 

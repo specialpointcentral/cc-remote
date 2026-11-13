@@ -40,6 +40,8 @@ if [ "$1" = --stop ]; then
   exit 0
 fi
 
+# No shared connection to talk to: `ssh -O check` and the like say so, as ssh does without a master.
+case " $* " in *" -O "*) echo "Control socket connect: No such file or directory" >&2; exit 255;; esac
 while [ $# -gt 1 ]; do
   case "$1" in -o|-p|-i) shift 2;; -*) shift;; *) shift; break;; esac
 done

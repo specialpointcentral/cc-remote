@@ -29,8 +29,8 @@ cc-remote 让 Claude Code 跑在一台你能 ssh 上去的服务器上，而它�
   用的是你本机的依赖、git 配置和构建工具。
 - **本地的 MCP 服务器照样能用。** 编辑器传来的、以及本地 Claude Code 配置里的 MCP 服务器都在本机运行，
   需要 OAuth 登录的也支持。
-- **服务器上什么都不用装。** 没有守护进程，不开端口，不装 agent。
-  只要 `ssh <your-server> claude --version` 能跑通，cc-remote 就能用。
+- **服务器上什么都不用装。** 不用安装服务，也不用开放端口：cc-remote 会自己把需要的东西复制到
+  `~/.cc-remote/` 下。只要 `ssh <your-server> claude --version` 能跑通，cc-remote 就能用。
 - **本机只需一个二进制，支持 macOS、Linux 和 Windows。** 本机不需要安装 `claude`，也不需要登录 Claude。
 - **就是原汁原味的 Claude Code。** cc-remote 就是 Claude Code 的 ACP 适配器
   [claude-agent-acp](https://github.com/agentclientprotocol/claude-agent-acp)，只改了一处：
@@ -54,6 +54,8 @@ cc-remote 让 Claude Code 跑在一台你能 ssh 上去的服务器上，而它�
 - **能 ssh 到服务器。** `ssh <your-server>` 能免密登录（用密钥，端口、用户名和跳板机写进 `~/.ssh/config`）。
 - **服务器上的 `claude` 已登录。** Claude Code 2.1.268 或更新版本，登录 shell 为 POSIX shell。
   在服务器上运行一次 `claude` 并登录，或者装好 cc-remote 后用 `cc-remote --cli auth login`。
+
+服务器上的 `python3`（3.6 或更高）是可选的：有它，连接断开后会话还能继续。
 
 本机上的 cc-remote 是一个没有任何依赖的二进制，只有从源码构建时才需要 [Bun](https://bun.sh)。
 支持 macOS、Linux 和 Windows；Windows 上还需要 Windows 10 及以上自带的 OpenSSH 客户端。
@@ -115,7 +117,8 @@ export CC_REMOTE_SSH="ssh -p 2222 -i ~/.ssh/id_ed25519"
 3. **连接：** 检查 ssh 能否不用密码、也不靠 ssh-agent 登录（Orca Server 没有 ssh-agent）。它可以通过 OpenSSH
    自己的提示信任未知的主机密钥，为 cc-remote 生成密钥并用 `ssh-copy-id` 复制过去（密码输给 ssh），
    再把这个密钥写进 `~/.ssh/config` 中一个受管理的块（会先备份）。绝不接受改变了的主机密钥。
-4. **检查服务器：** claude 的版本和登录状态、auto 权限模式、`~/.cc-remote`，以及 sshd 的限制和账号的资源。
+4. **检查服务器：** claude 的版本和登录状态、auto 权限模式、`~/.cc-remote`、python3（用于重连），以及
+   sshd 的限制和账号的资源。
    claude 不存在、太旧或未登录时，setup 会停下并给出提示：setup 从不安装、更新或登录 claude，
    也不会改动服务器上 `~/.cc-remote` 以外的任何东西。给服务器管理员的建议（例如 sshd 的 `MaxSessions`）
    只会打印出来，绝不自动应用。
@@ -309,6 +312,18 @@ cc-remote 会先把它复制到服务器。在服务器上，每个本地目录�
 通常它们都在，这时会话只用一个 ssh 通道就能启动。缺了什么，cc-remote 就只上传缺的部分，然后重新启动。
 这期间客户端发来的内容不会丢失，也不会重复。
 
+**连接断开。** 会话中的 claude 在 ssh 连接断开后会继续运行。服务器上有 `python3` 3.6 或更高版本时，
+cc-remote 会在一个小的中继下启动 claude，中继会被复制到服务器的 `~/.cc-remote/bin/`：它运行 claude，
+保存 claude 的输出直到你的机器收到，并等待 cc-remote 回来。cc-remote 每 10 秒发一次心跳；链路 45 秒
+没有任何消息（`CC_REMOTE_LINK_TIMEOUT`）或 ssh 退出时，它会用单独的连接重连，先立即重试，之后每隔几秒
+一次，数据流从断开的地方接着走。客户端和 claude 发出的内容都不会丢失，也不会重复，所以进行中的回合、
+正在运行的 Bash 命令或打开着的权限确认都会照常继续。没有连接时，服务器会保留 claude 30 分钟
+（`CC_REMOTE_RECONNECT_GRACE`，单位秒；设为 `0` 关闭此功能），之后将其停止；超过这个时间，或者服务器
+重启过，会话会像以前一样结束，下一条消息会恢复它。停止 cc-remote 或关闭聊天会停止服务器上的 claude；
+恢复会话时，会停止之前那个已失联的 cc-remote 留下的同一会话的 claude。服务器上没有 python3 时，会话照旧
+启动，cc-remote 会提示一次：连接断开会结束会话。claude 在中继下运行时，服务器自己的文件（计划文件、记忆、
+保存下来的工具结果）会走会话的连接，而不是每次单独执行一条 ssh 命令。
+
 **服务器上的 claude。** 每个会话启动时都会检查服务器上 claude 的版本，低于[前置条件](#前置条件)里的
 版本就拒绝启动。版本号会记住十分钟，所以有些应用每开一个聊天都要先查一次版本，这不会多花 ssh 往返；
 `cc-remote doctor` 则每次都会去服务器上查。Agent Teams 已关闭，因为队友会在服务器上运行，用不到你机器上的工具。
@@ -328,9 +343,18 @@ cc-remote 还把这一项写进 claude 启动时的 settings，服务器自己�
 （`CC_REMOTE_CONTROL_PERSIST`，可以填任何 `ControlPersist` 接受的值）。数据流会压缩（`Compression=yes`），
 链路慢时更快。每个连接都会设置 `ServerAliveInterval=15`，连续五分钟没有响应才放弃
 （`CC_REMOTE_KEEPALIVE_TIMEOUT`，单位秒），所以短暂断网不会让聊天中断，真正断开的连接也会报错而不是一直卡住。
+建立连接最多等 20 秒（`ConnectTimeout=20`），服务器不可达时很快就会报错。`IPQoS=none` 让流量的 DSCP 标记
+交给操作系统决定：上游 OpenSSH 会把这种不带终端的会话标成批量流量（`cs1`），在启用了 QoS 的网络和 Wi-Fi
+里会被排在其他流量后面。
 如果 `CC_REMOTE_SSH` 里更早出现了同名的 `-o`，则以那个为准。服务器拒绝在共享连接上再开会话时
 （sshd 的 `MaxSessions`，默认 10），这个会话会改用自己单独的连接重试。Windows 的 OpenSSH 不能共享连接，
 所以在 Windows 上每个会话各开一个连接。
+
+在中继下运行的会话靠自己的心跳更快发现断开的链路。重连使用单独的连接（`ControlPath=none`、
+`ConnectTimeout=10`、`BatchMode=yes`），所以卡在断开链路上的共享连接不会拖住它。会话的链路没有响应时，
+cc-remote 还会用一次快速的 `ssh <your-server> true` 检查共享连接；如果没有回应，就让它不再接受新会话
+（`ssh -O stop`），新的会话会建立新的连接，而不是一直卡到 keepalive 放弃。同时发起的版本探测（Orca 每个
+新聊天会发两次）共用一次 ssh。
 
 **Windows。** shell 工具是 PowerShell 而不是 Bash，和 Windows 上的 Claude Code 一致。PATH 里有
 PowerShell 7（`pwsh`）时用它，否则用 Windows PowerShell 5.1。Grep 需要 PATH 里有
@@ -345,6 +369,10 @@ PowerShell 7（`pwsh`）时用它，否则用 Windows PowerShell 5.1。Grep 需�
 - 文件检查点和回退记录在服务器上，因此看不到你本地的修改。
 - 从客户端桥接的 MCP 服务器只暴露工具，不暴露 resources 和 prompts。
 - LSP、Monitor 和 worktree 相关工具已关闭。
+- 重连需要服务器上有 `python3` 3.6 或更高版本。链路断开期间 claude 写到 stderr 的内容会被保留（最多
+  1 MiB），但断开那一刻正在传输的部分可能丢失；会话的数据流本身不会丢。如果服务器的 systemd-logind 会在
+  ssh 会话结束时杀掉该用户的进程（`KillUserProcesses=yes`），claude 就无法在连接断开后继续运行。
+- 一次性的 `claude -p`（例如 Orca 给聊天起标题）和 `cc-remote --cli` 不会重连。
 - claude 留在服务器上的自用文件只有 Read、Write、Edit 和 Glob 能访问，Bash 和 Grep 看不到。服务器上的
   skills 和插件不走这条路：skill 指向它旁边的文件时，读到的是你本机的同名文件（如果有）。不支持服务器
   设置里的 `plansDirectory`。
@@ -359,7 +387,6 @@ cc-remote 通过 `ssh -T` 启动 `claude`，于是同一条数据流就跨过了
 数据流上的一个代理会把工具名改回内置名，这样客户端能照常渲染 diff 和终端；它还会把服务器上的路径映射回本地路径。
 
 claude-agent-acp 只打了一处补丁（`patches/`）：一个改写每个会话 `query()` 选项的钩子。
-完整设计见 [`PLAN.md`](PLAN.md)。
 
 在 Orca 下，数据流另一端是 Orca 自己的 SDK，它对 cc-remote 一无所知。`cc-remote claude` 会像选项钩子
 那样调整 claude 的命令行，把本地工具加进 SDK 的 `initialize` 请求，并自己应答 claude 对这些工具的请求，
@@ -379,4 +406,5 @@ bun run build                     # dist/cc-remote-{linux-x64,linux-arm64,darwin
 `test/e2e/` 里有一个最小的 ACP 客户端和一个假的 ssh，它会在本机用独立的 `HOME` 运行"远端"那一侧。
 设 `FAKE_HOST_ISOLATED=1`（Linux，需要非特权 user namespace）后，假服务器在文件层面就是另一台机器：它的
 home、临时目录和 claude 的会话目录都是私有的，Claude 登录仍然共用。用法见 `test/e2e/client.ts` 和
-`test/e2e/fakessh` 的文件头。
+`test/e2e/fakessh` 的文件头。`test/e2e/sdk.ts` 扮演内嵌 Agent SDK 的应用（例如 Orca），在回合进行中
+弄断链路（正在运行的 Bash 调用、打开着的权限确认、冻结的链路），用来演示回合会照常继续；用法见文件头。

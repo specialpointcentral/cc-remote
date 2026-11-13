@@ -13,6 +13,7 @@ import { main as setup } from "./setup/index";
 import { main as update } from "./update/index";
 import { refreshLatest, updateNotice } from "./update/notice";
 import { remote } from "./options";
+import { stopRelays } from "./host-process";
 import { WINDOWS } from "./platform";
 import { hostVersion, quote, rsh } from "./ssh";
 import { killAll } from "./tools";
@@ -125,11 +126,14 @@ function serve(target: string) {
   const acp = serveAcp(undefined, { protocols: acpProtocolsFromEnv(Bun.env.CLAUDE_AGENT_ACP_PROTOCOL) });
   const shutdown = async () => {
     await acp.dispose().catch((e: unknown) => console.error("cc-remote: cleanup failed:", e));
+    // Sessions under the relay would keep claude running on the host for the grace period.
+    await stopRelays();
     process.exit(0);
   };
   acp.closed.then(shutdown);
   process.on("SIGTERM", shutdown);
   process.on("SIGINT", shutdown);
+  process.on("SIGHUP", shutdown);
   process.stdin.resume();
 }
 

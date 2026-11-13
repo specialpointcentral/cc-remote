@@ -4,6 +4,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "nod
 import { EDITS, PREFIX } from "./names";
 import { SHELL } from "./platform";
 import { evaluate, rulesFor, shellHookOutput, type ShellTool, type Verdict, withGrants } from "./rules";
+import type { Workspace } from "./tools/util";
 
 /**
  * cc-remote's own PreToolUse hook, added on the stream so it works whichever SDK is on the other end
@@ -19,7 +20,9 @@ import { evaluate, rulesFor, shellHookOutput, type ShellTool, type Verdict, with
  * they hold in every mode: deny refuses, ask prompts even in bypassPermissions and auto, and allow
  * runs a command without asking, which dontAsk needs. It also refuses subagents in a worktree, and
  * approves local edits in the working directories under acceptEdits and auto mode, as claude
- * approves its own there: in auto mode they would otherwise all go to the classifier.
+ * approves its own there: in auto mode they would otherwise all go to the classifier. Edits of the
+ * host claude's own plan and memory files (host-fs.ts) it approves in every mode, as claude
+ * approves its own.
  */
 export const HOOK_ID = "cc-remote-policy";
 
@@ -80,17 +83,24 @@ const deny = (reason: string): HookJSONOutput => ({
   hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: `cc-remote: ${reason}` },
 });
 
+const allow = (reason: string): HookJSONOutput => ({
+  hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "allow", permissionDecisionReason: `cc-remote: ${reason}` },
+});
+
 /**
  * The hook's answer. `input` is as the proxy passes it on, so the local shell tool already carries
- * its built-in name; `grants` are the session's own approvals, as allow rules.
+ * its built-in name; `grants` are the session's own approvals, as allow rules; `ws` the workspace
+ * the session's local tools share, with the shell's current directory and the host's files.
  */
-export function policyHook(input: Json | undefined, root: string, grants: Iterable<string>, dirs: string[] = []): HookJSONOutput {
+export function policyHook(input: Json | undefined, root: string, grants: Iterable<string>, dirs: string[] = [], ws?: Workspace): HookJSONOutput {
   if (input?.hook_event_name !== "PreToolUse") return {};
   const tool = input.tool_name;
   if (EDITS.includes(tool)) {
     const target = String(input.tool_input?.file_path ?? input.tool_input?.notebook_path ?? "");
+    const own = tool === "NotebookEdit" ? undefined : ws?.host?.selfEdited(target);
+    if (own) return allow(`${own === "plan" ? "the session's plan file" : "a memory file"}, on the host, which claude edits without asking`);
     return (input.permission_mode === "acceptEdits" || input.permission_mode === "auto") && workspaceEdit(target, root, dirs)
-      ? { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "allow", permissionDecisionReason: `cc-remote: an edit in the working directory, which ${input.permission_mode} mode approves` } }
+      ? allow(`an edit in the working directory, which ${input.permission_mode} mode approves`)
       : {};
   }
   if (AGENTS.includes(tool)) {
@@ -102,12 +112,13 @@ export function policyHook(input: Json | undefined, root: string, grants: Iterab
   }
   if (tool !== SHELL) return {};
   try {
-    return shellHookOutput(input.tool_input?.command, input.permission_mode, withGrants(rulesFor(root, SHELL as ShellTool), grants), SHELL as ShellTool, root);
+    const place = { root, cwd: ws?.cwd, dirs };
+    return shellHookOutput(input.tool_input?.command, input.permission_mode, withGrants(rulesFor(root, SHELL as ShellTool), grants), SHELL as ShellTool, place);
   } catch (e) {
     return deny(`could not check this command against your permission rules (${(e as Error).message})`);
   }
 }
 
-/** What the rules and the session's grants say about a shell command claude asks to run. */
-export const shellVerdict = (command: string, mode: string | undefined, root: string, grants: Iterable<string>): Verdict =>
-  evaluate(command, mode, withGrants(rulesFor(root, SHELL as ShellTool), grants), SHELL as ShellTool, root);
+/** What the rules and the session's grants say about a shell command claude asks to run, with the shell now in `cwd`. */
+export const shellVerdict = (command: string, mode: string | undefined, root: string, grants: Iterable<string>, dirs: string[] = [], cwd?: string): Verdict =>
+  evaluate(command, mode, withGrants(rulesFor(root, SHELL as ShellTool), grants), SHELL as ShellTool, { root, cwd, dirs });

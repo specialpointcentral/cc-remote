@@ -2,9 +2,84 @@
 # Stands in for ssh in end-to-end runs: drops the options and the host, and runs the remote
 # command on this machine with a separate HOME, so the "host" folders don't mix with local ones.
 # It shares this machine's Claude Code login through CLAUDE_CONFIG_DIR.
+#
+# FAKE_HOST_ISOLATED=1 makes the host a second machine as far as files go (Linux only; needs
+# unprivileged user namespaces, as `unshare -Urm true` tests). The remote commands then run in a
+# mount namespace with private tmpfs views the local side never sees:
+#
+# - all of /tmp, where the host's HOME ($FAKE_HOST_HOME) and claude's own temp folder are;
+# - $CLAUDE_CONFIG_DIR (~/.claude), at the same path. Its entries are this machine's, bound in,
+#   except the folders claude fills per session, which start empty: plans, projects (transcripts,
+#   spilled tool results, memory), file-history, todos, tasks and the like. So the host keeps the
+#   real login (a refreshed token lands in the real credentials file), settings, skills and plugins,
+#   while a file claude makes for itself there stays on the host, and so does a top-level file the
+#   real folder lacks, such as .claude.json.
+#
+# Paths read the same on both sides, as with a host whose home has the same path: a host file
+# reached with a local tool is missing, or a different file, as on a real second machine.
+#
+# One namespace serves every call, so what the host writes in one ssh call is there in the next.
+# It starts with the first call and lasts until `test/e2e/fakessh --stop` (the host's files go
+# with it). Its state lives in $FAKE_HOST_STATE (default ~/.cache/cc-remote-fake-host).
+#
+# FAKE_SSH_LOG, when set, gets each run's arguments, one line each, in either mode.
+[ -z "$FAKE_SSH_LOG" ] || printf '%s\n' "$*" >> "$FAKE_SSH_LOG"
+local_home=${REAL_HOME:-$HOME}
+config=${CLAUDE_CONFIG_DIR:-$local_home/.claude}
+state=${FAKE_HOST_STATE:-$local_home/.cache/cc-remote-fake-host}
+private="plans projects file-history todos tasks session-env sessions shell-snapshots paste-cache jobs backups debug"
+
+holder() {
+  pid=$(cat "$state/pid" 2>/dev/null) || return 1
+  [ -n "$pid" ] && [ "$(cat "/proc/$pid/comm" 2>/dev/null)" = sleep ]
+}
+
+if [ "$1" = --stop ]; then
+  holder && kill "$pid"
+  rm -rf "$state"
+  exit 0
+fi
+
 while [ $# -gt 1 ]; do
   case "$1" in -o|-p|-i) shift 2;; -*) shift;; *) shift; break;; esac
 done
-export HOME="${FAKE_HOST_HOME:-/tmp/cc-remote-fake-host}" CLAUDE_CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$REAL_HOME/.claude}"
-mkdir -p "$HOME/.local/bin" && ln -sf "$(PATH="$REAL_HOME/.local/bin:$PATH" command -v claude)" "$HOME/.local/bin/claude"
-exec sh -c "$1"
+claude=$(PATH="$local_home/.local/bin:$PATH" command -v claude)
+export HOME="${FAKE_HOST_HOME:-/tmp/cc-remote-fake-host}" CLAUDE_CONFIG_DIR="$config"
+# The host's PATH puts its own ~/.local/bin first, where claude is linked.
+setup='mkdir -p "$HOME/.local/bin" && ln -sf "$1" "$HOME/.local/bin/claude" && exec sh -c "$2"'
+
+if [ -z "$FAKE_HOST_ISOLATED" ]; then exec sh -c "$setup" sh "$claude" "$1"; fi
+
+# As root of a user namespace of its own: the mounts, then the pid once all is in place, then
+# holding the namespace open. The pid stays the same through each exec.
+mounts='
+  mount -t tmpfs -o mode=1777 tmpfs /tmp || exit 1
+  real=/tmp/.fake-host-real-config
+  mkdir "$real" && mount --bind "$2" "$real" && mount -t tmpfs -o mode=0755 tmpfs "$2" || exit 1
+  for e in "$real"/* "$real"/.[!.]* "$real"/..?*; do
+    [ -e "$e" ] || [ -L "$e" ] || continue
+    n=${e##*/}
+    case " $3 " in *" $n "*) continue;; esac
+    if [ -L "$e" ]; then cp -P "$e" "$2/$n"
+    elif [ -d "$e" ]; then mkdir "$2/$n" && mount --bind "$e" "$2/$n"
+    else : > "$2/$n" && mount --bind "$e" "$2/$n"; fi || exit 1
+  done
+  for d in $3; do mkdir -m 0700 "$2/$d" || exit 1; done
+  echo $$ > "$1/pid.tmp" && mv "$1/pid.tmp" "$1/pid" && exec sleep infinity'
+
+if ! holder; then
+  mkdir -p "$state" && chmod 700 "$state"
+  if mkdir "$state/lock" 2>/dev/null; then
+    rm -f "$state/pid"
+    setsid -f unshare -Urm --propagation private sh -c "$mounts" sh "$state" "$config" "$private" < /dev/null > "$state/log" 2>&1
+    n=0
+    until holder; do n=$((n + 1)); [ "$n" -lt 100 ] || { echo "fakessh: the host namespace did not start: $(cat "$state/log")" >&2; rmdir "$state/lock"; exit 255; }; sleep 0.05; done
+    rmdir "$state/lock"
+  else
+    n=0
+    until holder; do n=$((n + 1)); [ "$n" -lt 200 ] || { echo "fakessh: no host namespace; remove $state/lock if it is stale" >&2; exit 255; }; sleep 0.05; done
+  fi
+fi
+# Joining the namespace makes this user its root; one more user namespace makes it itself again,
+# so claude runs as this user, as on a real host.
+exec nsenter -t "$pid" -U -m --preserve-credentials -- unshare -U --map-user="$(id -u)" --map-group="$(id -g)" sh -c "$setup" sh "$claude" "$1"

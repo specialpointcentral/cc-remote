@@ -90,10 +90,14 @@ describe("the policy hook on the stream", () => {
     expect(decision("npm test", "auto")).toBe("allow");
     expect(decision("npm run anything", "auto")).toBeUndefined();
     expect(decision("rm -rf ~", "auto")).toBe("deny");
-    expect(decision("ls", "dontAsk")).toBeUndefined();
+    expect(decision("make build", "dontAsk")).toBeUndefined();
     expect(last()).toEqual({ subtype: "success", request_id: expect.any(String), response: {} });
     expect(replies.find((x) => x.response.response.hookSpecificOutput?.permissionDecision === "deny").response.response.hookSpecificOutput.permissionDecisionReason)
       .toBe("cc-remote: the permission rule Bash(rm:*) denies this command");
+    // Read-only commands run without asking, as Claude Code's own do, but not past an ask rule.
+    for (const mode of ["default", "acceptEdits", "plan", "dontAsk"]) expect(decision("ls -la", mode)).toBe("allow");
+    expect(decision("ls -la", "auto")).toBeUndefined();
+    expect(decision("ls && git push origin main", "default")).toBe("ask");
     const theirs = hook("mcp__cc__Bash", { command: "rm x" }, "default", "hook_0");
     expect(theirs.request.callback_id).toBe("hook_0");
   });

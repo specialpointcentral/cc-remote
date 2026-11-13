@@ -2,6 +2,26 @@ import { tool } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import { abs, err, ok, type Workspace } from "./util";
 
+/** An edit of a file's text, `undefined` for a file that isn't there: the new text, or why there is none. */
+export function applyEdit(text: string | undefined, path: string, old_string: string, new_string: string, replace_all?: boolean): { text: string } | { error: string } {
+  if (old_string === new_string) return { error: "No changes to make: old_string and new_string are exactly the same." };
+  if (text === undefined) return old_string === "" ? { text: new_string } : { error: `File does not exist: ${path}` };
+  if (old_string === "") return { error: "Cannot create new file - file already exists." };
+  const parts = text.split(old_string);
+  const matches = parts.length - 1;
+  if (matches === 0) return { error: `String to replace not found in file.\nString: ${old_string}` };
+  if (matches > 1 && !replace_all) {
+    return {
+      error: `Found ${matches} matches of the string to replace, but replace_all is false. To replace all occurrences, set replace_all to true. To replace only one occurrence, please provide more context to uniquely identify the instance.\nString: ${old_string}`,
+    };
+  }
+  // split/join instead of String.replace: replacement strings must not interpret `$&` and friends.
+  return { text: replace_all ? parts.join(new_string) : parts[0] + new_string + parts.slice(1).join(old_string) };
+}
+
+const done = (path: string, created: boolean) =>
+  ok(created ? `File created successfully at: ${path}` : `The file ${path} has been updated successfully.`);
+
 export const edit = (ws: Workspace) => tool(
   "Edit",
   `Performs exact string replacements in a file on the user's local filesystem.
@@ -17,28 +37,28 @@ export const edit = (ws: Workspace) => tool(
     replace_all: z.boolean().optional().describe("Replace all occurrences of old_string (default false)"),
   },
   async ({ file_path, old_string, new_string, replace_all }) => {
+    const remote = ws.host?.own(file_path);
+    if (remote && ws.host) {
+      // One of the host claude's own files, such as the plan file: read there, changed here, written back.
+      const host = ws.host;
+      try {
+        const got = await host.read(remote);
+        if (got === "directory") return err(`EISDIR: illegal operation on a directory, read '${remote}'`);
+        const before = got === "missing" ? undefined : new TextDecoder().decode(got);
+        const r = applyEdit(before, remote, old_string, new_string, replace_all);
+        if ("error" in r) return err(r.error);
+        await host.write(remote, r.text);
+        return done(remote, before === undefined);
+      } catch (e) {
+        return err((e as Error).message);
+      }
+    }
     const path = abs(ws, file_path);
-    if (old_string === new_string) return err("No changes to make: old_string and new_string are exactly the same.");
-
     const file = Bun.file(path);
-    if (!(await file.exists())) {
-      if (old_string !== "") return err(`File does not exist: ${path}`);
-      await Bun.write(path, new_string);
-      return ok(`File created successfully at: ${path}`);
-    }
-    if (old_string === "") return err("Cannot create new file - file already exists.");
-
-    const parts = (await file.text()).split(old_string);
-    const matches = parts.length - 1;
-    if (matches === 0) return err(`String to replace not found in file.\nString: ${old_string}`);
-    if (matches > 1 && !replace_all) {
-      return err(
-        `Found ${matches} matches of the string to replace, but replace_all is false. To replace all occurrences, set replace_all to true. To replace only one occurrence, please provide more context to uniquely identify the instance.\nString: ${old_string}`,
-      );
-    }
-    // split/join instead of String.replace: replacement strings must not interpret `$&` and friends.
-    const updated = replace_all ? parts.join(new_string) : parts[0] + new_string + parts.slice(1).join(old_string);
-    await Bun.write(path, updated);
-    return ok(`The file ${path} has been updated successfully.`);
+    const before = (await file.exists()) ? await file.text() : undefined;
+    const r = applyEdit(before, path, old_string, new_string, replace_all);
+    if ("error" in r) return err(r.error);
+    await Bun.write(path, r.text);
+    return done(path, before === undefined);
   },
 );

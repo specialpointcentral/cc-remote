@@ -1,13 +1,18 @@
 import type { SpawnedProcess, SpawnOptions } from "@anthropic-ai/claude-agent-sdk";
 import { type ChildProcess, spawn } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { hostname, userInfo } from "node:os";
-import { bundle, checkScript, installScript, type Need } from "./host-files";
+import { resolve } from "node:path";
+import { grantsSession } from "./grants";
+import { bundle, checkScript, installScript, type Need, type Ready, readyFields } from "./host-files";
+import { HostFiles } from "./host-fs";
 import { HostProcess } from "./host-process";
 import { WINDOWS } from "./platform";
 import { projectTrees } from "./project-claude";
 import { proxy } from "./proxy";
 import { localTranscript } from "./sessions";
 import { quote } from "./sh";
+import type { Workspace } from "./tools/util";
 import { cachedVersion, rememberVersion, tooOld } from "./version";
 
 export { quote };
@@ -123,6 +128,42 @@ export type Upload = { local: string; remote: string };
  */
 const NO_TEAMS = { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "0" };
 
+/** A `--settings` value as an object: inline JSON, or a local file holding it. Undefined when it is neither. */
+function settingsObject(value: string, cwd: string): Record<string, any> | undefined {
+  try {
+    const parsed = JSON.parse(/^\s*\{/.test(value) ? value : readFileSync(resolve(cwd, value), "utf8"));
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * claude's arguments with nothing left that turns agent teams on: an `--agent-teams` flag goes, and
+ * the settings get NO_TEAMS in their `env`, merged into the caller's own `--settings` (Orca passes
+ * `{"fastMode":false}`) as one flag at the end. A settings file's `env` outranks the environment
+ * claude starts with, so the host's user settings could otherwise turn teams back on; these flag
+ * settings outrank the user's. A value that is no JSON object, inline or in a local file, stays
+ * where it was, before ours, which claude takes as the last word.
+ */
+export function teamsOff(args: string[], cwd: string): string[] {
+  const out: string[] = [];
+  let merged: Record<string, any> = {};
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (a === "--agent-teams" || a.startsWith("--agent-teams=")) continue;
+    if (a !== "--settings" && !a.startsWith("--settings=")) {
+      out.push(a);
+      continue;
+    }
+    const value = a === "--settings" ? (args[++i] ?? "") : a.slice("--settings=".length);
+    const settings = settingsObject(value, cwd);
+    if (settings) merged = { ...merged, ...settings, env: { ...merged.env, ...settings.env } };
+    else out.push("--settings", value);
+  }
+  return [...out, "--settings", JSON.stringify({ ...merged, env: { ...merged.env, ...NO_TEAMS } })];
+}
+
 /**
  * How a start checks the host's claude version: not at all while the cached one is fresh (or, when
  * that one is too old, by refusing outright); otherwise the check prints it, at most once per TTL.
@@ -144,9 +185,10 @@ function versionCheck(host: string): { refuse?: string; ask?: string; ready?: (r
  * the plugins in `uploads`, the transcript of a session to resume, and the project's commands,
  * skills and agents. The remote command checks for them first and starts claude only when they're
  * all there; otherwise cc-remote sends what's missing over one more channel and starts it again.
- * What the SDK writes in the meantime waits for the claude that starts.
+ * What the SDK writes in the meantime waits for the claude that starts. `found` gets what the check
+ * reports about the host's folders, as claude starts.
  */
-export function launch(host: string, cwd: string, args: string[], env: Record<string, string>, uploads: Upload[] = [], signal?: AbortSignal): HostProcess {
+export function launch(host: string, cwd: string, args: string[], env: Record<string, string>, uploads: Upload[] = [], signal?: AbortSignal, found?: (where: Ready) => void): HostProcess {
   const needs: Need[] = uploads.map((u) => ({ kind: "plugin", ...u }));
   const resume = argument(args, "--resume", "-r");
   const transcript = resume ? localTranscript(resume, cwd) : undefined;
@@ -160,7 +202,7 @@ export function launch(host: string, cwd: string, args: string[], env: Record<st
   const tokens = { ready: `cc-remote-v1-ready-${nonce}`, missing: `cc-remote-v1-missing-${nonce}` };
   const version = versionCheck(host);
   const check = checkScript(needs, !project.files.length, tokens, version.ask);
-  const command = remoteCommand(args, { ...env, ...NO_TEAMS }, cwd, check);
+  const command = remoteCommand(teamsOff(args, cwd), { ...env, ...NO_TEAMS }, cwd, check);
   const ssh = (shared: boolean) => [...rsh(shared), "-T", host];
 
   return new HostProcess({
@@ -172,7 +214,11 @@ export function launch(host: string, cwd: string, args: string[], env: Record<st
       return { argv: [...ssh(shared), `${enter(cwd)} && ${installScript(needs, missing)}`], input: bundle(needs, missing) };
     },
     tokens,
-    ready: version.ready,
+    ready: (rest) => {
+      const where = readyFields(rest);
+      found?.(where);
+      return version.ready?.(where.version);
+    },
     refuse: version.refuse,
     signal,
   });
@@ -181,11 +227,17 @@ export function launch(host: string, cwd: string, args: string[], env: Record<st
 /** The host process where the proxy expects a ChildProcess: it uses only what both offer. */
 export const asChild = (host: HostProcess) => host as unknown as ChildProcess;
 
+/** Hands what a launch found about the host's folders to the local tools of the session in `ws`. */
+export const tellTools = (host: string, ws?: Workspace) => (where: Ready) => {
+  if (ws) ws.host = HostFiles.from(host, where);
+};
+
 /**
  * The SDK normally spawns claude locally and talks to it over stdin/stdout. We hand it ssh
- * instead; the protocol, tool calls included, rides over the same two pipes.
+ * instead; the protocol, tool calls included, rides over the same two pipes. `ws` is the
+ * workspace the session's local tools share.
  */
-export function spawner(host: string, cwd: string, env: Record<string, string>) {
+export function spawner(host: string, cwd: string, env: Record<string, string>, ws?: Workspace) {
   return (options: SpawnOptions): SpawnedProcess => {
     // ssh forwards no environment, so pass along what the SDK and ACP added for claude.
     const added = Object.fromEntries(
@@ -193,7 +245,8 @@ export function spawner(host: string, cwd: string, env: Record<string, string>) 
         (e): e is [string, string] => e[1] !== undefined && process.env[e[0]] !== e[1] && e[0] !== "CLAUDE_CONFIG_DIR",
       ),
     );
-    const child = launch(host, cwd, options.args, { ...added, ...env }, [], options.signal);
-    return proxy(asChild(child), { cwd, hostDir: hostDir(cwd), mode: argument(options.args, "--permission-mode") ?? "default" });
+    const child = launch(host, cwd, options.args, { ...added, ...env }, [], options.signal, tellTools(host, ws));
+    const mode = argument(options.args, "--permission-mode") ?? "default";
+    return proxy(asChild(child), { cwd, hostDir: hostDir(cwd), mode, ws, sessionId: grantsSession(options.args) });
   };
 }

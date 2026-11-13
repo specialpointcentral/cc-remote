@@ -156,7 +156,7 @@ paseo plugin install github:AkaraChen/cc-remote:paseo-plugin
 Orca 新对话默认的权限模式是 full-access，这时 Bash 会在项目机器上直接执行，不经询问。建议在 Orca
 设置里把默认模式改成 auto。即使在 full-access 下，settings 里的 deny 规则仍会拒绝，ask 规则仍会弹出卡片。
 Orca 只提供"本次会话允许"，没有"总是允许"；需要长期生效的授权请写进 `.claude/settings.local.json`。
-在 Orca 里切换对话的模式或模型时，Orca 会重启 claude，这个对话里"本次会话允许"的授权也会随之清空。
+在 Orca 里切换对话的模式或模型时，Orca 会重启 claude，这个对话里"本次会话允许"的授权会保留。
 
 每个对话的记录都会镜像到项目机器上的 `~/.claude/projects/`，Orca 从那里读取，所以历史记录、追问，
 以及 Orca Server 重启后恢复对话都能正常工作。Orca 自带的对话插件（内嵌可视化）会在第一次需要时
@@ -197,12 +197,26 @@ ask 规则总会询问，bypass（Orca 的 full-access）下也一样；allow �
 模式下批准简单的单条命令，在 auto 模式下批准范围窄的规则。命令会像 shell 那样拆开，所以藏在 `&&`、`|`、
 `$(…)` 后面，或者套了 `sudo`、`env` 这类包装的命令也能匹配到规则。删除 `/`、顶层目录、你的 home 目录或
 项目目录的上级目录（`rm`、`rmdir`）总会询问，在 auto 模式下直接拒绝，任何规则都不能放行。
+相对路径从 shell 当前所在目录算起，同一条命令里的 `cd` 也会跟进；`cd` 到 cc-remote 无法确定的位置
+（如 `cd "$DIR"`）之后，所有相对路径都按关键路径处理。
+
+只读命令在默认、accept-edits、plan 和 don't-ask 模式下不再询问，和 Claude Code 自己的 Bash 一样：`ls`、
+`cat`、`head`、`tail`、`wc`、`grep`/`rg`、不带 `-exec`/`-delete`/`-fprint` 的 `find`、`git status`/`log`/
+`diff`/`show`/`branch` 等，也可以用管道或 `&&` 连起来，输出只能重定向到 `/dev/null`，`cd` 只能进入会话
+目录。这份清单比 Claude Code 的窄，其他命令照旧询问。auto 模式下仍由分类器判断。
 
 Bash 命令需要确认时，提供的授权针对的是命令前缀（比如 `npm test:*`），而不是整个 Bash。Windows 上的
 PowerShell 命令同理。含有 `;`、`&`、`|`、重定向、`$(…)`、反引号或换行的命令永远不会被前缀授权放行。
 "不再询问"会把 `Bash(<前缀>:*)` 写进 `.claude/settings.local.json`，并像 Claude Code 一样在第一次写入时
 把这个文件加进全局 git 忽略列表；如果这个文件已被 git 跟踪，授权只在本次会话内有效。本次会话的授权
-在这个 claude 进程存在期间一直有效。子代理不能使用 `isolation: worktree`，因为 worktree 会建在服务器上。
+跟着会话保存在 `~/.cache/cc-remote/grants/` 下的私有文件里，同一会话新起的 claude（比如在 Orca 里切换
+模式或模型时重启的那个）仍然有效；三天没用的文件会被删除。子代理不能使用 `isolation: worktree`，因为 worktree 会建在服务器上。
+
+**服务器自己的文件。** claude 在服务器上保存一些自己的文件并让模型使用：plan 模式的计划文件（服务器上的
+`~/.claude/plans/`）、服务器上 `~/.claude/projects/` 里本会话的目录（自动记忆、因为太大而被存成文件的工具
+结果、子代理记录）、子代理记忆（`~/.claude/agent-memory/`）以及后台任务的输出。Read、Write、Edit 和
+Glob 会通过同一条 ssh 连接在服务器上读写这些文件，所以 plan 模式照常可用：计划写在 ExitPlanMode 读取它
+的地方，审批时也能看到。和 Claude Code 一样，写计划文件和记忆文件不会询问。
 
 **Shell。** Bash 在你的登录 shell 环境里运行，所以即使是 Orca 这类应用拉起 cc-remote，profile 里配置的
 工具（conda、nvm、`module` 等）也找得到。用 bash 或 zsh 时，cc-remote 只抓取一次这个环境并在会话之间共享，
@@ -225,6 +239,9 @@ cc-remote 会先把它复制到服务器。在服务器上，每个本地目录�
 **服务器上的 claude。** 每个会话启动时都会检查服务器上 claude 的版本，低于[前置条件](#前置条件)里的
 版本就拒绝启动。版本号会记住十分钟，所以有些应用每开一个聊天都要先查一次版本，这不会多花 ssh 往返；
 `cc-remote doctor` 则每次都会去服务器上查。Agent Teams 已关闭，因为队友会在服务器上运行，用不到你机器上的工具。
+cc-remote 还把这一项写进 claude 启动时的 settings，服务器自己的设置也无法再开启它，并会去掉
+`--agent-teams` 参数。claude-agent-acp 在每个会话启动时会多次查询 `claude auth status`，结果按服务器
+缓存一分钟；通过 `cc-remote --cli auth login` 或 `logout` 登录登出时清空缓存。
 
 **MCP 服务器。** 除了客户端传来的服务器，cc-remote 还会启动本地 Claude Code 会加载的那些：
 `~/.claude.json` 里的用户级服务器、为当前目录添加的服务器，以及项目 `.mcp.json` 中你已批准的服务器
@@ -255,8 +272,9 @@ PowerShell 7（`pwsh`）时用它，否则用 Windows PowerShell 5.1。Grep 需�
 - 文件检查点和回退记录在服务器上，因此看不到你本地的修改。
 - 从客户端桥接的 MCP 服务器只暴露工具，不暴露 resources 和 prompts。
 - LSP、Monitor 和 worktree 相关工具已关闭。
-- `ls`、`git status` 这类只读的 shell 命令在默认模式和 plan 模式下会询问，而 Claude Code 自己的 Bash
-  不会询问。
+- claude 留在服务器上的自用文件只有 Read、Write、Edit 和 Glob 能访问，Bash 和 Grep 看不到。服务器上的
+  skills 和插件不走这条路：skill 指向它旁边的文件时，读到的是你本机的同名文件（如果有）。不支持服务器
+  设置里的 `plansDirectory`。
 
 ## 工作原理
 
@@ -286,4 +304,6 @@ bun run build                     # dist/cc-remote-{linux-x64,linux-arm64,darwin
 ```
 
 `test/e2e/` 里有一个最小的 ACP 客户端和一个假的 ssh，它会在本机用独立的 `HOME` 运行"远端"那一侧。
-用法见 `test/e2e/client.ts` 的文件头。
+设 `FAKE_HOST_ISOLATED=1`（Linux，需要非特权 user namespace）后，假服务器在文件层面就是另一台机器：它的
+home、临时目录和 claude 的会话目录都是私有的，Claude 登录仍然共用。用法见 `test/e2e/client.ts` 和
+`test/e2e/fakessh` 的文件头。

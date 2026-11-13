@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 import { criticalRemoval } from "./critical";
 import { ShellSyntaxError, simpleCommands, type SimpleCommand } from "./lexer";
 import { ignoreGlobally, localSettingsDir, localSettingsFiles, tracked } from "./local-settings";
+import { type Place, readOnly } from "./readonly";
 import { home } from "./tools/util";
 
 /**
@@ -22,6 +23,12 @@ export type Verdict = { decision: Decision; rule?: string; reason?: string };
 
 /** Modes in which an allow rule approves a call outright. Auto mode does too, for narrow rules only (see broad). */
 const ALLOW_MODES = ["default", "acceptEdits", "dontAsk"];
+
+/**
+ * Modes in which a read-only command (readonly.ts) runs without asking, as Claude Code runs its own
+ * "in every mode". Auto mode leaves it to the classifier, which Claude Code may also consult there.
+ */
+const READ_ONLY_MODES = ["default", "acceptEdits", "plan", "dontAsk"];
 
 /** Where an administrator puts managed-settings.json. A field, so tests can point it elsewhere. */
 export const settingsLocations = {
@@ -218,13 +225,16 @@ function commandsIn(command: string, tool: ShellTool): SimpleCommand[] | undefin
 /**
  * What the user's rules say about a command in this permission mode. Deny, then ask, rules match
  * any simple command in it (wrappers such as sudo and env skipped, a path's basename too); dontAsk
- * mode refuses what an ask rule covers. Then, given the session's directory, removing a critical
- * path asks, or is refused in auto and dontAsk mode (critical.ts). Allow rules match only a plain
- * single command, in modes where Claude would let them approve outright; in auto mode only narrow
- * ones. A Bash command the lexer can't split is denied when deny rules exist, since none can be
- * ruled out; a PowerShell command that isn't plain is asked about instead.
+ * mode refuses what an ask rule covers. Then, given where the command runs (the session's root, or
+ * a Place that also says where the shell is now), removing a critical path asks, or is refused in
+ * auto and dontAsk mode (critical.ts). Allow rules match only a plain single command, in modes where
+ * Claude would let them approve outright; in auto mode only narrow ones. A read-only Bash command
+ * (readonly.ts) is approved in the modes where Claude Code runs its own without asking. A Bash
+ * command the lexer can't split is denied when deny rules exist, since none can be ruled out; a
+ * PowerShell command that isn't plain is asked about instead.
  */
-export function evaluate(command: string, mode: string | undefined, rules: Rules, tool: ShellTool = "Bash", cwd?: string): Verdict {
+export function evaluate(command: string, mode: string | undefined, rules: Rules, tool: ShellTool = "Bash", where?: string | Place): Verdict {
+  const place = typeof where === "string" ? { root: where } : where;
   if (rules.deny.length || rules.ask.length) {
     const commands = commandsIn(command, tool);
     if (!commands) {
@@ -238,7 +248,7 @@ export function evaluate(command: string, mode: string | undefined, rules: Rules
     const ask = matchingRule(rules.ask, commands, tool, true);
     if (ask) return asks(mode, { rule: ask, reason: `the permission rule ${ask} asks first` });
   }
-  const target = tool === "Bash" && cwd ? criticalRemoval(command, cwd) : undefined;
+  const target = tool === "Bash" && place ? criticalRemoval(command, place.root, place.cwd) : undefined;
   if (target !== undefined) {
     // As Claude Code does outside its terminal: asks where it can, else refuses; no rule approves it.
     const reason = `${JSON.stringify(target)} is a critical path (the filesystem root, a top-level directory, the home directory, or the working directory or one of its parents)`;
@@ -252,6 +262,9 @@ export function evaluate(command: string, mode: string | undefined, rules: Rules
     const allowed = mode === "auto" ? rules.allow.filter((r) => !broad(r, tool)) : rules.allow;
     const allow = words && matchingRule(allowed, [{ words, wrappers: [] }], tool, false);
     if (allow) return { decision: "allow", rule: allow, reason: `allowed by the permission rule ${allow}` };
+  }
+  if (mode && READ_ONLY_MODES.includes(mode) && tool === "Bash" && place && readOnly(command, place)) {
+    return { decision: "allow", reason: "a read-only command, which Claude Code runs without asking" };
   }
   return { decision: "none" };
 }
@@ -303,9 +316,9 @@ export const withGrants = (rules: Rules, grants: Iterable<string>): Rules => {
 };
 
 /** What a PreToolUse hook answers for a local shell command: the rules' decision in the hook's mode, or nothing. */
-export function shellHookOutput(command: unknown, mode: string | undefined, rules: Rules, tool: ShellTool, cwd?: string): HookJSONOutput {
+export function shellHookOutput(command: unknown, mode: string | undefined, rules: Rules, tool: ShellTool, where?: string | Place): HookJSONOutput {
   if (typeof command !== "string") return {};
-  const verdict = evaluate(command, mode, rules, tool, cwd);
+  const verdict = evaluate(command, mode, rules, tool, where);
   if (verdict.decision === "none") return {};
   return { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: verdict.decision, permissionDecisionReason: `cc-remote: ${verdict.reason}` } };
 }

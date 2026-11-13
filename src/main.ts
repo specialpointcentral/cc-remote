@@ -6,10 +6,11 @@ import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir, userInfo } from "node:os";
 import { basename, dirname, join } from "node:path";
 import pkg from "../package.json";
+import { runClaude } from "./auth-cache";
 import { claudeCompat } from "./claude";
 import { remote } from "./options";
 import { WINDOWS } from "./platform";
-import { hostVersion, quote, rsh, runRemote } from "./ssh";
+import { hostVersion, quote, rsh } from "./ssh";
 import { killAll } from "./tools";
 import { home } from "./tools/util";
 import { tooOld } from "./version";
@@ -143,7 +144,7 @@ if (args.claude) {
 } else {
   const target = await host(args.host);
   process.on("exit", killAll);
-  if (args.cli) process.exit(await runRemote(target, args.cli, process.cwd()));
+  if (args.cli) process.exit(await runClaude(target, args.cli, process.cwd()));
   else if (args.doctor) await doctor(target);
   else serve(target);
 }

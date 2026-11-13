@@ -14,8 +14,8 @@ export type Plan = {
   upload(missing: number[], shared: boolean): { argv: string[]; input: Uint8Array };
   tokens: Tokens;
   /**
-   * Gets what follows the token on the ready line, claude's version when the start asked for it,
-   * and returns why claude must not go on, if it mustn't.
+   * Gets what follows the token on the ready line (see Ready in host-files.ts), and returns why
+   * claude must not go on, if it mustn't.
    */
   ready?(rest: string): string | undefined;
   /** Why nothing may start at all, such as a host claude known to be too old. */
@@ -193,7 +193,7 @@ export class HostProcess extends EventEmitter {
         for (let nl = pending.indexOf(10); nl >= 0; nl = pending.indexOf(10)) {
           const line = pending.subarray(0, nl).toString().replace(/\r$/, "");
           pending = pending.subarray(nl + 1);
-          if (line.startsWith(tokens.ready)) return ready(line.slice(tokens.ready.length).trim());
+          if (line.startsWith(tokens.ready)) return ready(line.slice(tokens.ready.length));
           hold(line);
         }
       };

@@ -2,7 +2,7 @@ import { readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { WINDOWS } from "./platform";
 import { type ClaudeFile, clearCommand, installCommand, syncedTest } from "./project-claude";
-import { quote } from "./sh";
+import { quote, REMOTE_PATH } from "./sh";
 import { archive, type TarFile } from "./tar";
 
 /**
@@ -11,14 +11,17 @@ import { archive, type TarFile } from "./tar";
  * - a plugin, under a name that changes with its content, so present means current;
  * - the transcript of a session to resume that the host has never seen (a fork, or a session a
  *   local claude wrote);
- * - the project's commands, skills and agents, stamped with their content.
+ * - the project's commands, skills and agents, stamped with their content;
+ * - the relay (relay.ts), under a name that changes with its content, needed only on a host
+ *   whose python3 can run it.
  *
  * A session start checks for all of them on the host, and sends only what's missing.
  */
 export type Need =
   | { kind: "plugin"; local: string; remote: string }
   | { kind: "transcript"; local: string; sessionId: string }
-  | { kind: "project"; files: ClaudeFile[]; stamp: string };
+  | { kind: "project"; files: ClaudeFile[]; stamp: string }
+  | { kind: "relay"; remote: string; data: Uint8Array };
 
 /**
  * sh: claude's transcript folder for the current directory, which is the host folder. The name is
@@ -32,6 +35,7 @@ const transcript = (sessionId: string) => `"$P"/${quote(`${sessionId}.jsonl`)}`;
 /** sh: whether the host has it. Run in the host folder, with $P set when a transcript is needed. */
 function present(need: Need): string {
   if (need.kind === "plugin") return `[ -e ${home(need.remote)} ]`;
+  if (need.kind === "relay") return `[ -f ${home(need.remote)} ]`;
   if (need.kind === "transcript") return `[ -f ${transcript(need.sessionId)} ]`;
   return syncedTest(need.stamp);
 }
@@ -45,7 +49,7 @@ export const MISSING_STATUS = 97;
 /**
  * What the ready line says after its token, each field after a tab: where the host's claude keeps
  * its own files, so the file tools can tell them from local ones (host-fs.ts), then claude's
- * version when the start asked for it, else nothing.
+ * version when the start asked for it, else nothing; then `r` when claude starts under the relay.
  */
 export type Ready = {
   /** The host's $HOME. */
@@ -55,12 +59,35 @@ export type Ready = {
   /** The host folder's real path, which claude names its project folders after. */
   folder: string;
   version: string;
+  /** Whether claude starts under the relay, which outlives a dropped connection. */
+  relay: boolean;
 };
 
 /** The fields of a ready line, from what follows its token. */
 export function readyFields(rest: string): Ready {
-  const [, home = "", config = "", folder = "", version = ""] = rest.replace(/\r$/, "").split("\t");
-  return { home, config, folder, version: version.trim() };
+  const [, home = "", config = "", folder = "", version = "", relay = ""] = rest.replace(/\r$/, "").split("\t");
+  return { home, config, folder, version: version.trim(), relay: relay.trim() === "r" };
+}
+
+/**
+ * sh, part of the check: sets $py to a python3 of 3.6 or later on the PATH claude gets, when there
+ * is one, and only then counts the relay at `index` as missing if the host lacks it. Without
+ * python3, $py stays empty and claude starts as it is.
+ */
+function relayCheck(need: Extract<Need, { kind: "relay" }>, index: number): string {
+  const find = `py=$(${REMOTE_PATH} command -v python3 2>/dev/null)`;
+  const fit = `"$py" -S -c 'import sys; sys.exit(sys.version_info < (3, 6))' 2>/dev/null`;
+  return `if ${find} && ${fit}; then { ${present(need)} || m="$m ${index}"; }; else py=; fi`;
+}
+
+/**
+ * sh: stops the relay daemons, claude and all, that an earlier launch left running for this
+ * session, so two claudes never write its transcript at once. A grep first, so the usual case
+ * costs no python.
+ */
+function reapCommand(relay: string, sessionId: string): string {
+  const id = quote(sessionId);
+  return `if [ -n "$py" ] && grep -qsxF ${id} "$HOME"/.cc-remote/run/*/session 2>/dev/null; then "$py" -S ${home(relay)} reap ${id}; fi`;
 }
 
 /**
@@ -70,14 +97,16 @@ export function readyFields(rest: string): Ready {
  * command that prints it) and goes on; otherwise it prints the missing line, the indexes of what's
  * missing, on stderr and exits with MISSING_STATUS.
  */
-export function checkScript(needs: Need[], clear: boolean, tokens: Tokens, version?: string): string {
-  const steps = ["m="];
+export function checkScript(needs: Need[], clear: boolean, tokens: Tokens, version?: string, sessionId?: string): string {
+  const steps = ["m=", "py="];
   if (needs.some((n) => n.kind === "transcript")) steps.push(PROJECTS);
-  needs.forEach((need, i) => steps.push(`{ ${present(need)} || m="$m ${i}"; }`));
+  needs.forEach((need, i) => steps.push(need.kind === "relay" ? relayCheck(need, i) : `{ ${present(need)} || m="$m ${i}"; }`));
   if (clear) steps.push(clearCommand());
   steps.push(`if [ -n "$m" ]; then printf '%s%s\\n' ${quote(tokens.missing)} "$m" >&2; exit ${MISSING_STATUS}; fi`);
-  const fields = `"$HOME" "\${CLAUDE_CONFIG_DIR:-$HOME/.claude}" "$(pwd -P)" "${version ? `$(${version} 2>/dev/null)` : ""}"`;
-  steps.push(`printf '%s\\t%s\\t%s\\t%s\\t%s\\n' ${quote(tokens.ready)} ${fields}`);
+  const relay = needs.find((n): n is Extract<Need, { kind: "relay" }> => n.kind === "relay");
+  if (relay && sessionId) steps.push(reapCommand(relay.remote, sessionId));
+  const fields = `"$HOME" "\${CLAUDE_CONFIG_DIR:-$HOME/.claude}" "$(pwd -P)" "${version ? `$(${version} 2>/dev/null)` : ""}" "\${py:+r}"`;
+  steps.push(`printf '%s\\t%s\\t%s\\t%s\\t%s\\t%s\\n' ${quote(tokens.ready)} ${fields}`);
   return steps.join(" && ");
 }
 
@@ -119,6 +148,10 @@ export function bundle(needs: Need[], missing: number[]): Uint8Array {
       for (const f of need.files) files.push({ path: `${i}/${f.path}`, data: f.data, mode: f.executable ? 0o755 : 0o644, mtime: f.mtime });
       continue;
     }
+    if (need.kind === "relay") {
+      files.push({ path: `${i}`, data: need.data, mode: 0o700, mtime: 0 });
+      continue;
+    }
     const info = statSync(need.local);
     if (info.isDirectory()) walk(need.local, `${i}`, files);
     // A transcript is private, as claude keeps it.
@@ -153,6 +186,10 @@ export function installScript(needs: Need[], missing: number[]): string {
     if (need.kind === "transcript") {
       const dest = transcript(need.sessionId);
       return `${PROJECTS} && mkdir -p "$P" && { [ -f ${dest} ] || mv ${from(i)} ${dest}; }`;
+    }
+    if (need.kind === "relay") {
+      const dest = home(need.remote);
+      return `{ [ -f ${dest} ] || { mkdir -p "$(dirname ${dest})" && chmod 700 "$(dirname ${dest})" && mv ${from(i)} ${dest}; }; }`;
     }
     return `{ ${syncedTest(need.stamp)} || { ${installCommand(from(i), need.stamp)}; }; }`;
   });

@@ -103,7 +103,7 @@ describe("launch", () => {
     Bun.env.CC_REMOTE_SSH = `${host.ssh} -o ServerAliveInterval=60`;
     await run(project(), []);
     const call = host.calls()[0]!;
-    expect(call).toStartWith("-o ServerAliveInterval=60 -o Compression=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=20 -T box ");
+    expect(call).toStartWith("-o ServerAliveInterval=60 -o Compression=yes -o ConnectTimeout=20 -o IPQoS=none -o ServerAliveInterval=15 -o ServerAliveCountMax=20 -T box ");
   });
 
   test("sends what the host lacks over one more channel, then starts with the input delivered once", async () => {
@@ -327,7 +327,7 @@ describe("the check", () => {
     expect(missingIn(ready!, tokens)).toBeUndefined();
     // The ready line says where the host's claude keeps its files.
     expect(ready).toStartWith("READY-x\t");
-    expect(readyFields(ready!.slice("READY-x".length))).toEqual({ home, config: join(home, ".claude"), folder: realpathSync(home), version: "" });
+    expect(readyFields(ready!.slice("READY-x".length))).toEqual({ home, config: join(home, ".claude"), folder: realpathSync(home), version: "", relay: false });
   });
 
   test("the ready line carries claude's config folder and version when asked", () => {
@@ -336,7 +336,7 @@ describe("the check", () => {
     const home = mkdtempSync(join(dir, "check-"));
     const r = Bun.spawnSync(["sh", "-c", script], { cwd: home, env: { HOME: home, CLAUDE_CONFIG_DIR: "/etc/claude config", PATH: Bun.env.PATH! } });
     const line = r.stdout.toString().trim();
-    expect(readyFields(line.slice("READY-y".length))).toEqual({ home, config: "/etc/claude config", folder: realpathSync(home), version: "2.1.323 (Claude Code)" });
+    expect(readyFields(line.slice("READY-y".length))).toEqual({ home, config: "/etc/claude config", folder: realpathSync(home), version: "2.1.323 (Claude Code)", relay: false });
   });
 });
 
@@ -363,7 +363,14 @@ describe("rsh", () => {
     const ssh = rsh();
     expect(ssh).toContain("ControlMaster=auto");
     expect(ssh).toContain("ControlPersist=1h");
-    expect(ssh.slice(-6)).toEqual(["-o", "Compression=yes", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=20"]);
+    expect(ssh.slice(-10)).toEqual(["-o", "Compression=yes", "-o", "ConnectTimeout=20", "-o", "IPQoS=none", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=20"]);
+  });
+
+  test("puts the caller's options ahead of its own, since ssh keeps the first value it sees", () => {
+    delete Bun.env.CC_REMOTE_SSH;
+    const ssh = rsh(false, ["-o", "ConnectTimeout=10"]);
+    expect(ssh.indexOf("ConnectTimeout=10")).toBeGreaterThan(-1);
+    expect(ssh.indexOf("ConnectTimeout=10")).toBeLessThan(ssh.indexOf("ConnectTimeout=20"));
   });
 
   test("takes the persistence and the keepalive tolerance from the environment", () => {
@@ -380,7 +387,7 @@ describe("rsh", () => {
 
   test("a custom ssh keeps its own options first; without sharing, ours come before them", () => {
     Bun.env.CC_REMOTE_SSH = "/usr/bin/ssh -o ServerAliveInterval=60 -p 2222";
-    expect(rsh()).toEqual(["/usr/bin/ssh", "-o", "ServerAliveInterval=60", "-p", "2222", "-o", "Compression=yes", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=20"]);
+    expect(rsh()).toEqual(["/usr/bin/ssh", "-o", "ServerAliveInterval=60", "-p", "2222", "-o", "Compression=yes", "-o", "ConnectTimeout=20", "-o", "IPQoS=none", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=20"]);
     expect(rsh(false).slice(0, 5)).toEqual(["/usr/bin/ssh", "-o", "ControlMaster=no", "-o", "ControlPath=none"]);
     Bun.env.CC_REMOTE_SSH = "tsh ssh";
     expect(rsh()).toEqual(["tsh", "ssh"]);

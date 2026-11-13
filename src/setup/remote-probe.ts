@@ -46,6 +46,8 @@ if [ -n "$claude" ]; then
   help=$(${REMOTE_PATH} claude --help </dev/null 2>/dev/null)
   case "$help" in *'"auto"'*) kv HELP_AUTO 1 ;; *) kv HELP_AUTO 0 ;; esac
 fi
+py=$(${REMOTE_PATH} command -v python3 2>/dev/null)
+[ -z "$py" ] || kv PYTHON_VERSION "$("$py" -S -c 'import sys; print("%d.%d.%d" % sys.version_info[:3])' </dev/null 2>/dev/null)"
 d="$HOME/.cc-remote"
 if [ -d "$d" ]; then kv CC_DIR dir
 elif [ -L "$d" ]; then kv CC_DIR dangling

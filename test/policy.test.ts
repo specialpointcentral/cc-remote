@@ -1,11 +1,16 @@
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
+import { EventEmitter } from "node:events";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { PassThrough } from "node:stream";
+import type { ChildProcess } from "node:child_process";
+import { sdkHost } from "../src/control";
 import { resetLocalSettings } from "../src/local-settings";
 import { HOOK_ID, withPolicyHook } from "../src/policy";
-import { rewriter, type Session } from "../src/proxy";
+import { proxy, rewriter, type Session } from "../src/proxy";
 import { settingsLocations } from "../src/rules";
+import { localTools } from "../src/tools";
 
 const base = realpathSync(mkdtempSync(join(tmpdir(), "cc-remote-policy-")));
 // Claude's settings, git's global config and the home directory are all temporary here.
@@ -193,5 +198,37 @@ describe("shell permission requests", () => {
     const { approve } = stream(session());
     const reply = approve([{ type: "addRules", rules: [{ toolName: "Bash" }, { toolName: "Edit" }], behavior: "allow", destination: "session" }]);
     expect(reply.response.response.updatedPermissions[0].rules).toEqual([{ toolName: "mcp__cc__Bash" }, { toolName: "mcp__cc__Edit" }]);
+  });
+});
+
+/** A stand-in for the ssh child: what is written to its stdin, and a stdout to write claude's lines to. */
+function fakeClaude() {
+  const child = Object.assign(new EventEmitter(), { stdin: new PassThrough(), stdout: new PassThrough(), killed: false, exitCode: null, signalCode: null, kill: () => true });
+  const received: any[] = [];
+  child.stdin.on("data", (d: Buffer) => d.toString().split("\n").filter(Boolean).forEach((l) => received.push(JSON.parse(l))));
+  return { child: child as unknown as ChildProcess, received, say: (m: object) => child.stdout.write(`${JSON.stringify(m)}\n`) };
+}
+
+describe("composed with the SDK host of claude-compatible mode", () => {
+  test("initialize carries both cc-remote's servers and its hook, and the hook's callbacks never reach the SDK", async () => {
+    const { child, received, say } = fakeClaude();
+    const s = session();
+    const sdk = proxy(child, s, (toClaude) => sdkHost({ cc: localTools(project) }, "ENV", toClaude));
+    const toSdk: any[] = [];
+    sdk.stdout.on("data", (d: Buffer) => d.toString().split("\n").filter(Boolean).forEach((l) => toSdk.push(JSON.parse(l))));
+    sdk.stdin.write(`${JSON.stringify({ type: "control_request", request_id: "i", request: { subtype: "initialize", hooks: { PreToolUse: [{ matcher: "Write", hookCallbackIds: ["hook_0"] }] } } })}\n`);
+    await Bun.sleep(20);
+    const init = received.find((m) => m.request?.subtype === "initialize").request;
+    expect(init.sdkMcpServers).toEqual(["cc"]);
+    expect(init.hooks.PreToolUse).toEqual([{ matcher: "Write|mcp__cc__Write", hookCallbackIds: ["hook_0"] }, { matcher: "mcp__cc__Bash|mcp__cc__Write|mcp__cc__Edit|mcp__cc__NotebookEdit|Agent|Task", hookCallbackIds: [HOOK_ID] }]);
+
+    say({ type: "control_request", request_id: "h1", request: { subtype: "hook_callback", callback_id: HOOK_ID, input: { hook_event_name: "PreToolUse", tool_name: "mcp__cc__Bash", tool_input: { command: "rm -rf /" }, permission_mode: "bypassPermissions" } } });
+    say({ type: "control_request", request_id: "h2", request: { subtype: "hook_callback", callback_id: "hook_0", input: { hook_event_name: "PreToolUse", tool_name: "mcp__cc__Write", tool_input: {} } } });
+    await Bun.sleep(20);
+    expect(received.find((m) => m.response?.request_id === "h1").response.response.hookSpecificOutput.permissionDecision).toBe("deny");
+    expect(toSdk.map((m) => m.request_id)).toEqual(["h2"]);
+    expect(toSdk[0].request.input.tool_name).toBe("Write");
+    expect(s.mode).toBe("bypassPermissions");
+    sdk.stdin.end();
   });
 });

@@ -4,8 +4,9 @@ import acpPkg from "@agentclientprotocol/claude-agent-acp/package.json";
 import { acpProtocolsFromEnv, serveAcp } from "@agentclientprotocol/claude-agent-acp/dist/serve.js";
 import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir, userInfo } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import pkg from "../package.json";
+import { claudeCompat } from "./claude";
 import { remote } from "./options";
 import { WINDOWS } from "./platform";
 import { hostVersion, quote, rsh, runRemote } from "./ssh";
@@ -15,6 +16,7 @@ import { tooOld } from "./version";
 
 const USAGE = `Usage: cc-remote [--host <host>]
        cc-remote [--host <host>] --cli <claude arguments...>
+       cc-remote [--host <host>] claude <claude arguments...>
        cc-remote [--host <host>] doctor
 
 Claude Code as an ACP agent, with the model on a remote host and the tools on this machine.
@@ -23,11 +25,17 @@ Point an ACP client (Zed, paseo, ...) at \`cc-remote --host <host>\`.
   --host <host>    ssh host where claude is installed and logged in
                    (else $CC_REMOTE_HOST, else ~/.config/cc-remote/host)
   --cli <args...>  run claude on the host with these arguments, e.g. --cli auth login
+  claude <args...> stand in for the claude executable of an app that embeds the Claude
+                   Agent SDK, such as Orca: its tools run here, in the current directory.
+                   Also what cc-remote does when it is run under the name \`claude\`
   doctor           check the connection and the remote claude version
   -v, --version    print the version
   -h, --help       print this help
 
   CC_REMOTE_SSH="ssh -p 2222"   ssh command to use, like rsync's RSYNC_RSH`;
+
+/** A binary from `bun build --compile`, as opposed to `bun src/main.ts`. */
+const COMPILED = Bun.main.startsWith("/$bunfs/") || Bun.main.startsWith("B:/~BUN/");
 
 const fail = (message: string): never => {
   console.error(`cc-remote: ${message}`);
@@ -35,10 +43,11 @@ const fail = (message: string): never => {
 };
 
 function parse(argv: string[]) {
-  const args = { host: undefined as string | undefined, cli: undefined as string[] | undefined, doctor: false, version: false, help: false };
+  const args = { host: undefined as string | undefined, cli: undefined as string[] | undefined, claude: undefined as string[] | undefined, doctor: false, version: false, help: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!;
     if (a === "--cli") { args.cli = argv.slice(i + 1); break; }
+    if (a === "claude") { args.claude = argv.slice(i + 1); break; }
     if (a === "--host") args.host = argv[++i] ?? fail("--host needs a value");
     else if (a.startsWith("--host=")) args.host = a.slice(7);
     else if (a === "doctor") args.doctor = true;
@@ -71,7 +80,7 @@ async function doctor(target: string) {
  * it at a script that runs them on the host, through `cc-remote --cli`.
  */
 function claudeShim(target: string) {
-  const self = Bun.main.startsWith("/$bunfs/") || Bun.main.startsWith("B:/~BUN/") ? [process.execPath] : [process.execPath, Bun.main];
+  const self = COMPILED ? [process.execPath] : [process.execPath, Bun.main];
   const name = `claude-${Bun.hash(target).toString(36)}`;
   const command = [...self, "--host", target, "--cli"];
   if (WINDOWS) {
@@ -115,8 +124,19 @@ process.emitWarning = ((warning: string | Error, ...rest: [{ code?: string }?]) 
   if (rest[0]?.code !== "CLAUDE_SDK_CAN_USE_TOOL_SHADOWED") emitWarning(warning, ...(rest as []));
 }) as typeof process.emitWarning;
 
-const args = parse(process.argv.slice(2));
-if (args.help) {
+/**
+ * A compiled cc-remote run as `claude` (a link or copy by that name) takes every argument as
+ * claude's. Under bun the script's name is already resolved through links, so there it's only
+ * `cc-remote claude`.
+ */
+const asClaude = COMPILED && basename(process.argv0).replace(/\.exe$/i, "") === "claude";
+
+const args = asClaude ? { ...parse([]), claude: process.argv.slice(2) } : parse(process.argv.slice(2));
+if (args.claude) {
+  const target = await host(args.host);
+  process.on("exit", killAll);
+  await claudeCompat(target, args.claude);
+} else if (args.help) {
   console.log(USAGE);
 } else if (args.version) {
   console.log(`${pkg.version} (cc-remote, claude-agent-acp ${acpPkg.version})`);

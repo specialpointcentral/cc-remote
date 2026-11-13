@@ -39,3 +39,9 @@ export function widenMatcher(matcher: string | undefined): string | undefined {
   const named = LOCAL.filter((t) => new RegExp(`(^|\\|)${t}(\\||$)`).test(matcher));
   return named.length ? `${matcher}|${named.map((t) => PREFIX + t).join("|")}` : matcher;
 }
+
+/** Every matcher of a hooks map, as the SDK options and its initialize request both lay them out. */
+export function widenHooks<T extends { matcher?: string }>(hooks: Record<string, T[]> | undefined): Record<string, T[]> | undefined {
+  if (!hooks) return hooks;
+  return Object.fromEntries(Object.entries(hooks).map(([event, matchers]) => [event, matchers.map((m) => ({ ...m, matcher: widenMatcher(m.matcher) }))]));
+}

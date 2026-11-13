@@ -10,6 +10,8 @@ code, your shell, your toolchain and your editor stay with you.
 
 It's an [ACP](https://agentclientprotocol.com) agent, so it plugs straight into
 [acpc](https://github.com/AkaraChen/acpc) in the terminal, Zed, paseo and any other ACP client. To your editor it looks exactly like Claude Code.
+It can also stand in for the `claude` executable of apps that embed the Claude Agent SDK, such as
+[Orca](#orca).
 
 ```
   your machine                                   server
@@ -142,12 +144,64 @@ command and the executable path (Settings → Plugins → cc-remote). The "Check
 paseo plugin install github:AkaraChen/cc-remote:paseo-plugin
 ```
 
+### Orca
+
+[Orca](https://github.com/stablyai/orca) can't add ACP agents, but its Claude chats run whatever
+executable its **Claude Command** names, and talk to it the way the Claude Agent SDK talks to
+`claude`. `cc-remote claude` stands in for that executable: the model runs on your server, and
+Read, Write, Edit, Bash, Glob and Grep run in the chat's folder on the machine where Orca Server
+runs. With several project machines, each one runs Orca Server and cc-remote, and all of them share
+one server with a logged-in `claude`.
+
+On each project machine (where Orca Server runs and your files are):
+
+1. Install cc-remote, write the host file and run `cc-remote doctor`, as in [Install](#install).
+   Orca Server doesn't read your shell profile, so use the host file rather than `$CC_REMOTE_HOST`.
+2. Set Orca's Claude Command (in the Claude agent's settings) to the full path of cc-remote,
+   followed by `claude`:
+
+   ```
+   /home/me/.bun/bin/cc-remote claude
+   ```
+
+   `command -v cc-remote` prints the path. To pick the server here instead of in the host file,
+   put `--host <your-server>` before `claude`. If you need `CC_REMOTE_SSH`, add it to the Claude
+   agent's environment variables in Orca.
+3. Open a new Claude chat. Approvals, tool cards and diffs look the same as with a local Claude.
+
+Orca's default permission mode for new chats is full-access, where Bash runs on the project machine
+without asking. Consider switching the default to auto in Orca's settings. Even in full-access,
+deny rules from your settings still refuse and ask rules still show a card. Orca offers "Allow for
+this session" but no "always allow"; put lasting approvals in `.claude/settings.local.json`. Orca
+restarts claude when you change a chat's mode or model, which also clears that chat's session
+approvals.
+
+Each chat's transcript is mirrored to `~/.claude/projects/` on the project machine, where Orca reads
+it, so history, follow-ups and resuming a chat after Orca Server restarts work. Orca's built-in
+chat plugin (inline visuals) is copied to the server, under `~/.cc-remote/plugins/`, the first time a
+chat needs it. For an app that only takes a path with no arguments, a link named `claude` that
+points at the cc-remote binary works like `cc-remote claude`. Keep the link off your `PATH`, so it
+doesn't shadow a local `claude`.
+
+Limits with Orca, on top of the [general ones](#limits):
+
+- Chats always use the server's Claude login. Orca's account switching doesn't change that, so use
+  Orca's system account; with a managed account, transcripts go to that account's folder, but the
+  login is still the server's.
+- Orca's one-off `claude -p` calls, such as naming a chat, run on the server with no tools.
+- Claude in Orca's terminal panes uses the same command, and cc-remote refuses it: an interactive
+  `claude` would work on the server's folder, not your project. Use Orca's chats, or acpc in the
+  terminal.
+- Orca's agent status hooks are installed in the project machine's Claude settings, which the
+  server's `claude` doesn't read.
+
 ### Commands
 
 ```
-cc-remote [--host <host>]                  speak ACP on stdio (what your client runs)
-cc-remote [--host <host>] doctor           check ssh and the remote claude version
-cc-remote [--host <host>] --cli <args...>  run `claude <args...>` on the server
+cc-remote [--host <host>]                    speak ACP on stdio (what your client runs)
+cc-remote [--host <host>] doctor             check ssh and the remote claude version
+cc-remote [--host <host>] --cli <args...>    run `claude <args...>` on the server
+cc-remote [--host <host>] claude <args...>   stand in for `claude` under an Agent SDK app, such as Orca
 cc-remote --version | --help
 ```
 
@@ -258,6 +312,12 @@ renders diffs and terminals as usual. It also maps the server's paths to your lo
 
 claude-agent-acp is patched in one place (`patches/`): a hook that rewrites the `query()` options
 for each session. See [`PLAN.md`](PLAN.md) for the full design.
+
+Under Orca the SDK on the other end of the stream is Orca's, which knows nothing about cc-remote.
+`cc-remote claude` adjusts claude's command line the same way the options hook does, adds the local
+tools to the SDK's `initialize` request, and answers claude's requests for them itself, so they never
+reach Orca. It also turns on claude's transcript mirror and writes the mirror locally. Everything
+else on the stream, Orca's own tools and permission prompts included, passes through the same proxy.
 
 ## Develop
 

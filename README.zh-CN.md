@@ -52,7 +52,7 @@ cc-remote 让 Claude Code 跑在一台你能 ssh 上去的服务器上，而它�
 开始之前，先准备好这两样：
 
 - **能 ssh 到服务器。** `ssh <your-server>` 能免密登录（用密钥，端口、用户名和跳板机写进 `~/.ssh/config`）。
-- **服务器上的 `claude` 已登录。** Claude Code 2.1.248 或更新版本，登录 shell 为 POSIX shell。
+- **服务器上的 `claude` 已登录。** Claude Code 2.1.268 或更新版本，登录 shell 为 POSIX shell。
   在服务器上运行一次 `claude` 并登录，或者装好 cc-remote 后用 `cc-remote --cli auth login`。
 
 本机需要 [Bun](https://bun.sh) 来构建 cc-remote，构建出的二进制没有任何依赖。
@@ -149,8 +149,17 @@ cc-remote --version | --help
 
 **会话。** 每个会话都会镜像到本机的 `~/.claude/projects/`，也就是本地 Claude Code 存放会话的位置。
 客户端可以从那里列出、回放、加载和 fork 会话。如果恢复一个服务器没见过的会话（比如 fork 出来的），
-cc-remote 会先把它复制到服务器。在服务器上，每个本地目录都有一个独立的空工作目录，位于
+cc-remote 会先把它复制到服务器。在服务器上，每个本地目录都有一个独立的工作目录，位于
 `~/.cc-remote/ws/<你的主机名>/<本地路径>/`。
+
+**启动会话。** claude 启动之前，会在服务器上做一次检查，看会话需要的东西在不在：要恢复的会话记录、
+客户端传来的插件，以及项目的 `.claude/commands`、`.claude/skills` 和 `.claude/agents`（见[限制](#限制)）。
+通常它们都在，这时会话只用一个 ssh 通道就能启动。缺了什么，cc-remote 就只上传缺的部分，然后重新启动。
+这期间客户端发来的内容不会丢失，也不会重复。
+
+**服务器上的 claude。** 每个会话启动时都会检查服务器上 claude 的版本，低于[前置条件](#前置条件)里的
+版本就拒绝启动。版本号会记住十分钟，所以有些应用每开一个聊天都要先查一次版本，这不会多花 ssh 往返；
+`cc-remote doctor` 则每次都会去服务器上查。Agent Teams 已关闭，因为队友会在服务器上运行，用不到你机器上的工具。
 
 **MCP 服务器。** 除了客户端传来的服务器，cc-remote 还会启动本地 Claude Code 会加载的那些：
 `~/.claude.json` 里的用户级服务器、为当前目录添加的服务器，以及项目 `.mcp.json` 中你已批准的服务器
@@ -160,9 +169,12 @@ cc-remote 会先把它复制到服务器。在服务器上，每个本地目录�
 调用它会在本机浏览器打开登录页，在 `localhost` 接收回调，之后服务器真正的工具就会出现。
 令牌保存在 `~/.config/cc-remote/mcp-auth/`，与 Claude Code 自己的分开。
 
-**ssh。** 默认所有会话共享一个连接（`ControlMaster`，保持 10 分钟）。每个连接都会设置
-`ServerAliveInterval=15` 和 `ServerAliveCountMax=3`，连接断了大约一分钟内就会报错，而不是一直卡住。
-如果 `CC_REMOTE_SSH` 里更早出现了同名的 `-o`，则以那个为准。Windows 的 OpenSSH 不能共享连接，
+**ssh。** 默认所有会话共享一个连接（`ControlMaster`），最后一个会话结束后再保持一小时
+（`CC_REMOTE_CONTROL_PERSIST`，可以填任何 `ControlPersist` 接受的值）。数据流会压缩（`Compression=yes`），
+链路慢时更快。每个连接都会设置 `ServerAliveInterval=15`，连续五分钟没有响应才放弃
+（`CC_REMOTE_KEEPALIVE_TIMEOUT`，单位秒），所以短暂断网不会让聊天中断，真正断开的连接也会报错而不是一直卡住。
+如果 `CC_REMOTE_SSH` 里更早出现了同名的 `-o`，则以那个为准。服务器拒绝在共享连接上再开会话时
+（sshd 的 `MaxSessions`，默认 10），这个会话会改用自己单独的连接重试。Windows 的 OpenSSH 不能共享连接，
 所以在 Windows 上每个会话各开一个连接。
 
 **Windows。** shell 工具是 PowerShell 而不是 Bash，和 Windows 上的 Claude Code 一致。PATH 里有
@@ -172,7 +184,8 @@ PowerShell 7（`pwsh`）时用它，否则用 Windows PowerShell 5.1。Grep 需�
 
 ### 限制
 
-- 项目的 `.claude/` 目录（commands、skills、agents、settings）不会发送到服务器。
+- 项目的 `.claude/` 目录里，只有 `commands/`、`skills/` 和 `agents/` 会发送到服务器（有变化时复制到
+  对应的工作目录；最多 1000 个文件，单个 1 MiB，总共 8 MiB）。settings 和 hooks 留在本机。
   服务器上用户级的设置、skills 和 MCP 服务器仍然生效。
 - 文件检查点和回退记录在服务器上，因此看不到你本地的修改。
 - 从客户端桥接的 MCP 服务器只暴露工具，不暴露 resources 和 prompts。

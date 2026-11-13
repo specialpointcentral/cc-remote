@@ -58,7 +58,7 @@ Before you start, have these two in place:
 
 - **ssh to the server works.** `ssh <your-server>` logs you in without a password prompt (use a key, and
   put ports, users and jump hosts in `~/.ssh/config`).
-- **`claude` on the server is logged in.** Claude Code 2.1.248 or later, with a POSIX login shell.
+- **`claude` on the server is logged in.** Claude Code 2.1.268 or later, with a POSIX login shell.
   Run `claude` there once and log in, or use `cc-remote --cli auth login` after installing.
 
 On your machine you need [Bun](https://bun.sh) to build cc-remote. The binary it builds has no
@@ -162,8 +162,21 @@ or newlines is never approved automatically. Prefix approvals last until cc-remo
 **Sessions.** Each session is mirrored to `~/.claude/projects/` on your machine, in the same place
 a local Claude Code would keep it. Your client can list, replay, load and fork sessions from there.
 If you resume a session the server has never seen, such as a fork, cc-remote copies it to the
-server first. On the server, each local directory gets its own empty working folder at
+server first. On the server, each local directory gets its own working folder at
 `~/.cc-remote/ws/<your hostname>/<local path>/`.
+
+**Starting a session.** Before claude starts, one check on the server looks for what the session
+needs: the transcript of a session being resumed, plugins the client passes, and the project's
+`.claude/commands`, `.claude/skills` and `.claude/agents` (see [Limits](#limits)). When they are all
+there, which is the usual case, the session starts on a single ssh channel. Otherwise cc-remote
+uploads only what is missing and starts again. Nothing your client sends is lost or repeated in
+between.
+
+**The server's claude.** Each session checks that the server's claude is at least the version in
+[Requirements](#requirements) and refuses to start otherwise. The version is remembered for ten
+minutes, so the version probes some apps make before every chat cost no ssh round trip;
+`cc-remote doctor` always asks the server. Agent teams are turned off, because teammates would run
+on the server without your machine's tools.
 
 **MCP servers.** Besides the servers your client passes, cc-remote starts the ones your local
 Claude Code would: user servers from `~/.claude.json`, the ones added for this directory, and the
@@ -176,11 +189,15 @@ opens the login page in your local browser, takes the redirect on `localhost`, a
 server's real tools appear. The tokens are kept in `~/.config/cc-remote/mcp-auth/`, separately
 from Claude Code's.
 
-**ssh.** By default all sessions share one connection (`ControlMaster`, kept open for 10 minutes).
-Every connection sends `ServerAliveInterval=15` and `ServerAliveCountMax=3`, so a dead link fails
-in about a minute instead of hanging. If an `-o` with the same name comes earlier in
-`CC_REMOTE_SSH`, that one is used instead. Windows' OpenSSH can't share connections, so there each
-session opens its own.
+**ssh.** By default all sessions share one connection (`ControlMaster`), kept open for an hour after
+the last session (`CC_REMOTE_CONTROL_PERSIST`, any `ControlPersist` value). The stream is
+compressed (`Compression=yes`), which helps on slow links. Every connection sends
+`ServerAliveInterval=15` and gives up after five minutes of silence (`CC_REMOTE_KEEPALIVE_TIMEOUT`,
+in seconds), so a short network drop doesn't end a chat and a dead link still fails instead of
+hanging. If an `-o` with the same name comes earlier in `CC_REMOTE_SSH`, that one is used instead.
+When the server refuses another session on the shared connection (sshd's `MaxSessions`, 10 by
+default), that session retries on a connection of its own. Windows' OpenSSH can't share
+connections, so there each session opens its own.
 
 **Windows.** The shell tool is PowerShell instead of Bash, as in Claude Code on Windows. cc-remote
 uses PowerShell 7 (`pwsh`) when it's on PATH, otherwise Windows PowerShell 5.1. Grep needs
@@ -189,8 +206,10 @@ like `C:\Users\me\app` gets the working folder `~/.cc-remote/ws/<your hostname>/
 
 ### Limits
 
-- Your project's `.claude/` directory (commands, skills, agents, settings) is not sent to the
-  server. The server's user-level settings, skills and MCP servers still apply.
+- Of your project's `.claude/` directory, only `commands/`, `skills/` and `agents/` go to the server
+  (copied into its working folder when they change; up to 1000 files, 1 MiB each, 8 MiB in all).
+  Settings and hooks stay on your machine. The server's user-level settings, skills and MCP servers
+  still apply.
 - File checkpoints and rewind are recorded on the server, so they can't see your local edits.
 - Bridged MCP servers from your client expose their tools only, not resources or prompts.
 - LSP, Monitor and the worktree tools are turned off.

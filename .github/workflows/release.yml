@@ -1,0 +1,35 @@
+# Builds the five release binaries and publishes them, with SHA256SUMS, as the release of a
+# pushed `v*` tag. install.sh and `cc-remote update` download from that release and check every
+# binary against SHA256SUMS before installing it.
+#
+# Nothing runs until a maintainer pushes a tag. Before the first release, check on a Mac that the
+# darwin-arm64 binary built here on Linux starts (code signing of cross-built binaries is
+# unverified).
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.4
+      # --frozen-lockfile also applies patches/ (patchedDependencies in package.json).
+      - run: bun install --frozen-lockfile
+      - run: bun test
+      - name: The tag matches package.json
+        run: test "v$(bun -e 'console.log(require("./package.json").version)')" = "$GITHUB_REF_NAME"
+      - run: bun run build
+      - run: cd dist && sha256sum cc-remote-* > SHA256SUMS && cat SHA256SUMS
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/cc-remote-* dist/SHA256SUMS --verify-tag --title "$GITHUB_REF_NAME" --generate-notes

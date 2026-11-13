@@ -63,14 +63,31 @@ Before you start, have these two in place:
 - **`claude` on the server is logged in.** Claude Code 2.1.268 or later, with a POSIX login shell.
   Run `claude` there once and log in, or use `cc-remote --cli auth login` after installing.
 
-On your machine you need [Bun](https://bun.sh) to build cc-remote. The binary it builds has no
-dependencies. It runs on macOS, Linux and Windows; on Windows it also needs the OpenSSH client
-that ships with Windows 10 and later.
+On your machine, cc-remote is a single binary with no dependencies; [Bun](https://bun.sh) is needed
+only to build it from source. It runs on macOS, Linux and Windows; on Windows it also needs the
+OpenSSH client that ships with Windows 10 and later.
 
 ## Install
 
+On each machine you use cc-remote on (your laptop, or each project machine that runs Orca Server):
+
 ```sh
-git clone https://github.com/AkaraChen/cc-remote && cd cc-remote
+curl -fsSL https://raw.githubusercontent.com/specialpointcentral/cc-remote/main/install.sh | sh
+```
+
+The installer downloads the release binary for this machine (linux-x64, linux-arm64 or
+darwin-arm64), checks it against the release's `SHA256SUMS`, puts it in
+`~/.local/share/cc-remote/versions/<version>/` with `~/.local/bin/cc-remote` pointing at it, and then
+runs [`cc-remote setup`](#setup). It never uses sudo and never edits your shell's startup files; if
+`~/.local/bin` isn't on your PATH, it says what to add. Options after `sh -s --` go to setup, for
+example `| sh -s -- --host <your-server>`; `--no-setup` skips setup, and `CC_REMOTE_VERSION=0.3.1`
+installs that release. On Windows, download `cc-remote-windows-x64.exe` (or `-arm64.exe`) from the
+releases page; after that, [`cc-remote update`](#update) keeps it current.
+
+### From source
+
+```sh
+git clone https://github.com/specialpointcentral/cc-remote && cd cc-remote
 bun install
 bun run compile    # builds the binary for this machine into dist/cc-remote
 bun link           # puts cc-remote on your PATH, in ~/.bun/bin
@@ -78,9 +95,10 @@ bun link           # puts cc-remote on your PATH, in ~/.bun/bin
 
 `bun run compile` picks the `build:<os>-<arch>` script for the machine you run it on. To build
 every platform at once (linux-x64, linux-arm64, darwin-arm64, windows-x64, windows-arm64), run
-`bun run build`; the binaries land in `dist/`.
+`bun run build`; the binaries land in `dist/`. A source install updates with `git pull && bun run
+compile`, not `cc-remote update`.
 
-Tell it which host to use, then check the connection:
+Run `cc-remote setup`, or tell it which host to use yourself and check the connection:
 
 ```sh
 mkdir -p ~/.config/cc-remote && echo <your-server> > ~/.config/cc-remote/host
@@ -98,6 +116,69 @@ export CC_REMOTE_SSH="ssh -p 2222 -i ~/.ssh/id_ed25519"
 ```
 
 If the server isn't logged in yet, run `cc-remote --cli auth login`.
+
+## Setup
+
+`cc-remote setup` goes through everything on this machine step by step, and is safe to run again
+(a re-run asks only for the server, and Enter keeps it):
+
+1. **This machine:** ssh, the cc-remote install, ripgrep, your login shell, git and the hostname. For
+   a missing tool it shows the exact install command and asks `[y/N]` before running it.
+2. **Central server:** asks which server to use. Tab completes from `~/.ssh/config`,
+   `~/.ssh/known_hosts` and earlier answers, and Up and Down browse them.
+3. **Connecting:** checks that ssh logs in without a password and without ssh-agent, which Orca
+   Server doesn't have. It offers to trust an unknown host key through OpenSSH's own prompt, to make
+   a key for cc-remote and copy it with `ssh-copy-id` (the password goes to ssh), and to name that key
+   in a managed block of `~/.ssh/config`, backed up first. A changed host key is never accepted.
+4. **Checking the server:** claude's version and login, permission mode auto, `~/.cc-remote`, and
+   sshd's limits and the account's resources. A missing, too old or logged-out claude stops setup with
+   a hint: setup never installs, updates or logs in claude, and changes nothing on the server outside
+   `~/.cc-remote`. Advice for the server's admin, such as sshd's `MaxSessions`, is printed, never
+   applied.
+5. **Saving:** the host file `~/.config/cc-remote/host`, and a marker for this machine on the server,
+   which warns when two project machines have the same hostname.
+6. **Orca Server on this machine**, if one runs: sets its Claude Command to
+   `~/.local/bin/cc-remote claude`, offers permission mode auto for new Claude chats (Claude's only;
+   other agents keep theirs), and can copy `CC_REMOTE_SSH` into Orca's Claude environment. Each
+   change shows the current and the new value, asks first, and is read back from Orca.
+7. **End to end:** runs Orca's command with `--version` the way Orca does, in Orca Server's
+   environment, without ssh-agent, asking the server live.
+
+```sh
+cc-remote setup                                   # at a terminal
+cc-remote setup --check                           # verify only, change nothing; exits 1 on a failure
+cc-remote setup --yes --host <your-server>        # unattended, with the defaults; installs nothing
+cc-remote setup --yes --install --host <your-server> --orca set
+```
+
+Without a terminal, or with `--yes`, setup takes the safe answers: it writes the host file and its
+own records, changes Orca's Claude Command only from Orca's default or another cc-remote path
+(`--orca set` replaces any command, `--orca skip` leaves Orca alone), and changes the permission mode
+only from Orca's default. It installs tools only with `--install`, through `sudo -n`. `--smoke` ends
+with one tiny real prompt, which costs tokens. `cc-remote setup --help` lists every option. Messages
+are in English or Chinese, following your locale or `--lang`.
+
+Setup keeps its history and a record of every change it made, with the value it replaced, in
+`~/.config/cc-remote/`.
+
+## Update
+
+```sh
+cc-remote update --check          # the installed and the latest version; changes nothing
+cc-remote update                  # install the latest release and switch to it
+cc-remote update --version 0.3.1  # that release, older ones too
+cc-remote update --rollback       # back to the previous version
+```
+
+An update never interrupts what's running. The new version goes into a folder of its own beside
+the current one, and `~/.local/bin/cc-remote` is switched to it with an atomic rename: sessions and
+Orca chats that are running keep the version they started with, and new ones get the new version.
+Orca's Claude Command names `~/.local/bin/cc-remote`, so it never needs changing. Before switching,
+the update checks the download against `SHA256SUMS`, runs it, and, when a server is configured, runs
+its `doctor` there, so a server whose claude is too old for the new version stops the update
+(`--skip-host-check` switches anyway when the server can't be reached). Old versions are removed
+once nothing runs them, and the previous one stays for `--rollback`. cc-remote never updates itself;
+`setup` mentions a newer release when there is one.
 
 ## Use
 
@@ -155,13 +236,15 @@ one server with a logged-in `claude`.
 
 On each project machine (where Orca Server runs and your files are):
 
-1. Install cc-remote, write the host file and run `cc-remote doctor`, as in [Install](#install).
-   Orca Server doesn't read your shell profile, so use the host file rather than `$CC_REMOTE_HOST`.
-2. Set Orca's Claude Command (in the Claude agent's settings) to the full path of cc-remote,
-   followed by `claude`:
+1. Install cc-remote as in [Install](#install). The installer runs [`cc-remote setup`](#setup),
+   which writes the host file, sets Orca's Claude Command and offers permission mode auto for new
+   Claude chats. Orca Server doesn't read your shell profile, so use the host file rather than
+   `$CC_REMOTE_HOST`.
+2. To do it by hand instead, set Orca's Claude Command (in the Claude agent's settings) to the full
+   path of cc-remote, followed by `claude`:
 
    ```
-   /home/me/.bun/bin/cc-remote claude
+   /home/me/.local/bin/cc-remote claude
    ```
 
    `command -v cc-remote` prints the path. To pick the server here instead of in the host file,
@@ -170,7 +253,8 @@ On each project machine (where Orca Server runs and your files are):
 3. Open a new Claude chat. Approvals, tool cards and diffs look the same as with a local Claude.
 
 Orca's default permission mode for new chats is full-access, where Bash runs on the project machine
-without asking. Consider switching the default to auto in Orca's settings. Even in full-access,
+without asking; `cc-remote setup` offers to switch Claude chats to auto, or change it in Orca's
+settings. Even in full-access,
 deny rules from your settings still refuse and ask rules still show a card. Orca offers "Allow for
 this session" but no "always allow"; put lasting approvals in `.claude/settings.local.json`. Orca
 restarts claude when you change a chat's mode or model; the chat's session approvals carry over.
@@ -201,6 +285,8 @@ cc-remote [--host <host>]                    speak ACP on stdio (what your clien
 cc-remote [--host <host>] doctor             check ssh and the remote claude version
 cc-remote [--host <host>] --cli <args...>    run `claude <args...>` on the server
 cc-remote [--host <host>] claude <args...>   stand in for `claude` under an Agent SDK app, such as Orca
+cc-remote setup [--check] [options]          set up this machine, the server and Orca; see Setup
+cc-remote update [--check | --rollback]      install the latest release; see Update
 cc-remote --version | --help
 ```
 

@@ -55,13 +55,28 @@ cc-remote 让 Claude Code 跑在一台你能 ssh 上去的服务器上，而它�
 - **服务器上的 `claude` 已登录。** Claude Code 2.1.268 或更新版本，登录 shell 为 POSIX shell。
   在服务器上运行一次 `claude` 并登录，或者装好 cc-remote 后用 `cc-remote --cli auth login`。
 
-本机需要 [Bun](https://bun.sh) 来构建 cc-remote，构建出的二进制没有任何依赖。
+本机上的 cc-remote 是一个没有任何依赖的二进制，只有从源码构建时才需要 [Bun](https://bun.sh)。
 支持 macOS、Linux 和 Windows；Windows 上还需要 Windows 10 及以上自带的 OpenSSH 客户端。
 
 ## 安装
 
+在每台要用 cc-remote 的机器上（你的笔记本，或每台运行 Orca Server 的项目机器）运行：
+
 ```sh
-git clone https://github.com/AkaraChen/cc-remote && cd cc-remote
+curl -fsSL https://raw.githubusercontent.com/specialpointcentral/cc-remote/main/install.sh | sh
+```
+
+安装脚本会下载适合本机的发布版二进制（linux-x64、linux-arm64 或 darwin-arm64），用发布中的
+`SHA256SUMS` 校验，放到 `~/.local/share/cc-remote/versions/<版本>/`，让 `~/.local/bin/cc-remote` 指向它，
+然后运行 [`cc-remote setup`](#设置)。它从不使用 sudo，也从不修改 shell 的启动文件；如果 `~/.local/bin`
+不在 PATH 上，会告诉你要加什么。`sh -s --` 之后的选项会传给 setup，例如 `| sh -s -- --host <your-server>`；
+`--no-setup` 跳过 setup，`CC_REMOTE_VERSION=0.3.1` 安装指定版本。Windows 上请从发布页面下载
+`cc-remote-windows-x64.exe`（或 `-arm64.exe`），之后用 [`cc-remote update`](#更新) 保持更新。
+
+### 从源码安装
+
+```sh
+git clone https://github.com/specialpointcentral/cc-remote && cd cc-remote
 bun install
 bun run compile    # 为当前机器构建二进制，输出到 dist/cc-remote
 bun link           # 把 cc-remote 加到 PATH，位于 ~/.bun/bin
@@ -69,8 +84,9 @@ bun link           # 把 cc-remote 加到 PATH，位于 ~/.bun/bin
 
 `bun run compile` 会根据当前机器选择对应的 `build:<os>-<arch>` 脚本。要一次构建所有平台
 （linux-x64、linux-arm64、darwin-arm64、windows-x64、windows-arm64），运行 `bun run build`，产物在 `dist/`。
+从源码安装的用 `git pull && bun run compile` 更新，而不是 `cc-remote update`。
 
-指定要用的主机，然后检查连接：
+运行 `cc-remote setup`，或者自己指定要用的主机，然后检查连接：
 
 ```sh
 mkdir -p ~/.config/cc-remote && echo <your-server> > ~/.config/cc-remote/host
@@ -87,6 +103,59 @@ export CC_REMOTE_SSH="ssh -p 2222 -i ~/.ssh/id_ed25519"
 ```
 
 如果服务器还没登录，运行 `cc-remote --cli auth login`。
+
+## 设置
+
+`cc-remote setup` 会逐步检查和配置本机的一切，可以放心重复运行（再次运行时只会询问服务器，按回车保留原值）：
+
+1. **本机：** ssh、cc-remote 的安装、ripgrep、登录 shell、git 和主机名。缺少工具时会显示确切的安装命令，
+   并先以 `[y/N]` 询问再运行。
+2. **中心服务器：** 询问要用哪台服务器。Tab 会从 `~/.ssh/config`、`~/.ssh/known_hosts` 和以前的输入中补全，
+   上下方向键可以浏览它们。
+3. **连接：** 检查 ssh 能否不用密码、也不靠 ssh-agent 登录（Orca Server 没有 ssh-agent）。它可以通过 OpenSSH
+   自己的提示信任未知的主机密钥，为 cc-remote 生成密钥并用 `ssh-copy-id` 复制过去（密码输给 ssh），
+   再把这个密钥写进 `~/.ssh/config` 中一个受管理的块（会先备份）。绝不接受改变了的主机密钥。
+4. **检查服务器：** claude 的版本和登录状态、auto 权限模式、`~/.cc-remote`，以及 sshd 的限制和账号的资源。
+   claude 不存在、太旧或未登录时，setup 会停下并给出提示：setup 从不安装、更新或登录 claude，
+   也不会改动服务器上 `~/.cc-remote` 以外的任何东西。给服务器管理员的建议（例如 sshd 的 `MaxSessions`）
+   只会打印出来，绝不自动应用。
+5. **保存：** host 文件 `~/.config/cc-remote/host`，以及服务器上本机的标记，两台项目机器主机名相同时会发出警告。
+6. **本机的 Orca Server**（如果在运行）：把它的 Claude Command 设为 `~/.local/bin/cc-remote claude`，
+   为新的 Claude 聊天提供 auto 权限模式（只改 Claude 的，其他 agent 保持不变），还可以把 `CC_REMOTE_SSH`
+   复制到 Orca 的 Claude 环境变量。每项改动都会显示当前值和新值，先询问，再从 Orca 读回确认。
+7. **端到端：** 按 Orca 的方式运行 Orca 的命令加 `--version`，使用 Orca Server 的环境、不依赖 ssh-agent，
+   实时询问服务器。
+
+```sh
+cc-remote setup                                   # 在终端里交互运行
+cc-remote setup --check                           # 只验证，不做任何改动；有失败时退出码为 1
+cc-remote setup --yes --host <your-server>        # 无人值守，采用默认选择；不安装任何东西
+cc-remote setup --yes --install --host <your-server> --orca set
+```
+
+没有终端或加了 `--yes` 时，setup 只采用安全的选择：写 host 文件和它自己的记录；Orca 的 Claude Command
+只在它是 Orca 默认值或其他 cc-remote 路径时才修改（`--orca set` 总是替换，`--orca skip` 不碰 Orca）；
+权限模式只从 Orca 的默认值修改。只有加 `--install` 才会安装工具，并通过 `sudo -n` 进行。`--smoke`
+会在最后发送一次很小的真实提问，会消耗 token。`cc-remote setup --help` 列出所有选项。提示信息按你的
+locale 或 `--lang` 使用中文或英文。
+
+setup 会在 `~/.config/cc-remote/` 中保存输入历史，以及它做过的每项改动和被替换的旧值。
+
+## 更新
+
+```sh
+cc-remote update --check          # 已安装版本和最新版本；不做任何改动
+cc-remote update                  # 安装最新版本并切换过去
+cc-remote update --version 0.3.1  # 指定版本，也可以是更旧的
+cc-remote update --rollback       # 切回上一个版本
+```
+
+更新从不打断正在运行的东西。新版本放进当前版本旁边自己的目录，`~/.local/bin/cc-remote` 通过一次原子的
+重命名切换过去：正在运行的会话和 Orca 聊天继续使用它们启动时的版本，新开的才会用新版本。Orca 的
+Claude Command 指向 `~/.local/bin/cc-remote`，因此永远不需要修改。切换之前，更新会用 `SHA256SUMS` 校验
+下载、运行新版本，并在配置了服务器时用它在服务器上运行 `doctor`：服务器上的 claude 对新版本来说太旧时，
+更新会停止（服务器连不上时，`--skip-host-check` 可以照样切换）。旧版本在没有任何进程使用后才会删除，
+上一个版本会保留以便 `--rollback`。cc-remote 从不自动更新；有新版本时 `setup` 会提示。
 
 ## 使用
 
@@ -141,20 +210,22 @@ paseo plugin install github:AkaraChen/cc-remote:paseo-plugin
 
 在每台项目机器上（运行 Orca Server、存放文件的那台）：
 
-1. 按[安装](#安装)一节安装 cc-remote，写好主机文件，并运行 `cc-remote doctor`。
-   Orca Server 不读取你的 shell 配置文件，所以请用主机文件，而不是 `$CC_REMOTE_HOST`。
-2. 把 Orca 的 Claude Command（在 Claude agent 的设置里）设为 cc-remote 的完整路径，后面加上 `claude`：
+1. 按[安装](#安装)一节安装 cc-remote。安装脚本会运行 [`cc-remote setup`](#设置)，它会写好主机文件、
+   设置 Orca 的 Claude Command，并提议把新 Claude 对话的权限模式设为 auto。Orca Server 不读取你的
+   shell 配置文件，所以请用主机文件，而不是 `$CC_REMOTE_HOST`。
+2. 如果想手动设置：把 Orca 的 Claude Command（在 Claude agent 的设置里）设为 cc-remote 的完整路径，
+   后面加上 `claude`：
 
    ```
-   /home/me/.bun/bin/cc-remote claude
+   /home/me/.local/bin/cc-remote claude
    ```
 
    `command -v cc-remote` 会输出这个路径。如果想在这里指定服务器而不是用主机文件，就在 `claude`
    前加上 `--host <your-server>`。需要 `CC_REMOTE_SSH` 的话，把它加到 Orca 里 Claude agent 的环境变量中。
 3. 新开一个 Claude 对话。权限确认、工具卡片和 diff 都和本地 Claude 一样。
 
-Orca 新对话默认的权限模式是 full-access，这时 Bash 会在项目机器上直接执行，不经询问。建议在 Orca
-设置里把默认模式改成 auto。即使在 full-access 下，settings 里的 deny 规则仍会拒绝，ask 规则仍会弹出卡片。
+Orca 新对话默认的权限模式是 full-access，这时 Bash 会在项目机器上直接执行，不经询问。`cc-remote setup`
+会提议把 Claude 对话改成 auto，也可以在 Orca 设置里自己改。即使在 full-access 下，settings 里的 deny 规则仍会拒绝，ask 规则仍会弹出卡片。
 Orca 只提供"本次会话允许"，没有"总是允许"；需要长期生效的授权请写进 `.claude/settings.local.json`。
 在 Orca 里切换对话的模式或模型时，Orca 会重启 claude，这个对话里"本次会话允许"的授权会保留。
 
@@ -180,6 +251,8 @@ cc-remote [--host <host>]                    在 stdio 上提供 ACP（客户端
 cc-remote [--host <host>] doctor             检查 ssh 和远端 claude 的版本
 cc-remote [--host <host>] --cli <args...>    在服务器上运行 `claude <args...>`
 cc-remote [--host <host>] claude <args...>   在内嵌 Agent SDK 的应用（如 Orca）里替代 `claude`
+cc-remote setup [--check] [options]          设置本机、服务器和 Orca；见“设置”
+cc-remote update [--check | --rollback]      安装最新版本；见“更新”
 cc-remote --version | --help
 ```
 

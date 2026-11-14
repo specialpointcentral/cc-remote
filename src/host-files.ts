@@ -90,6 +90,25 @@ function reapCommand(relay: string, sessionId: string): string {
   return `if [ -n "$py" ] && grep -qsxF ${id} "$HOME"/.cc-remote/run/*/session 2>/dev/null; then "$py" -S ${home(relay)} reap ${id}; fi`;
 }
 
+/** Other versions' relay scripts go once they have gone unused for longer than this many days. */
+const RELAY_KEEP_DAYS = 7;
+
+/**
+ * sh: marks this relay script used, and deletes other versions' that have gone unused for a week,
+ * so the host doesn't keep one per release. Each version's session start marks its own, and a
+ * deleted one is sent again when that version next needs it. A script a running daemon came from
+ * stays whatever its age, since a reconnect runs it again; when ps can't tell, nothing goes.
+ */
+function pruneCommand(relay: string): string {
+  const name = relay.slice(relay.lastIndexOf("/") + 1);
+  const dir = relay.slice(0, relay.lastIndexOf("/"));
+  const stale = `[ -n "$(find "$f" -prune -mtime +${RELAY_KEEP_DAYS - 1} 2>/dev/null)" ]`;
+  const unused = `a=$(ps -ww -eo args 2>/dev/null) && case $a in *"\${f##*/}"*) false;; esac`;
+  return `{ if [ -n "$py" ]; then touch -c ${home(relay)} 2>/dev/null; `
+    + `for f in "$HOME"/${quote(dir)}/relay-*.py; do case \${f##*/} in ${quote(name)}|'relay-*.py') continue;; esac; `
+    + `${stale} && ${unused} && rm -f -- "$f"; done; fi; :; }`;
+}
+
 /**
  * sh, run in the host folder ahead of claude: checks that the host has everything in `needs`, and
  * removes the host's copy of the project's trees when the project has none (`clear`). With all of
@@ -105,6 +124,7 @@ export function checkScript(needs: Need[], clear: boolean, tokens: Tokens, versi
   steps.push(`if [ -n "$m" ]; then printf '%s%s\\n' ${quote(tokens.missing)} "$m" >&2; exit ${MISSING_STATUS}; fi`);
   const relay = needs.find((n): n is Extract<Need, { kind: "relay" }> => n.kind === "relay");
   if (relay && sessionId) steps.push(reapCommand(relay.remote, sessionId));
+  if (relay) steps.push(pruneCommand(relay.remote));
   const fields = `"$HOME" "\${CLAUDE_CONFIG_DIR:-$HOME/.claude}" "$(pwd -P)" "${version ? `$(${version} 2>/dev/null)` : ""}" "\${py:+r}"`;
   steps.push(`printf '%s\\t%s\\t%s\\t%s\\t%s\\t%s\\n' ${quote(tokens.ready)} ${fields}`);
   return steps.join(" && ");

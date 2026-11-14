@@ -17,7 +17,8 @@ import { home } from "./tools/util";
 
 /** The local shell tool, whose name is also its rules' name: `Bash(...)`, or `PowerShell(...)` on Windows. */
 export type ShellTool = "Bash" | "PowerShell";
-export type Rules = { allow: string[]; ask: string[]; deny: string[] };
+/** `invalid` names the settings files that are there but can't be used, and why: their rules are unknown. */
+export type Rules = { allow: string[]; ask: string[]; deny: string[]; invalid?: string[] };
 export type Decision = "deny" | "ask" | "allow" | "none";
 export type Verdict = { decision: Decision; rule?: string; reason?: string };
 
@@ -60,14 +61,45 @@ function forTool(entry: string, tool: ShellTool, behavior: keyof Rules): boolean
   return behavior !== "allow" && !entry.includes("(") && entry.includes("*") && wildcard(entry, "").test(tool);
 }
 
-/** The tool's rules in these files, per behavior. Unreadable or invalid files are skipped. */
+type Settings = { permissions?: Record<string, unknown>; allowManagedPermissionRulesOnly?: unknown };
+
+/** A settings file's content; nothing for a missing or empty one; why it can't be used otherwise. */
+function readSettings(path: string): { settings?: Settings; problem?: string } {
+  let text: string;
+  try {
+    text = readFileSync(path, "utf8");
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException).code;
+    return code === "ENOENT" || code === "ENOTDIR" ? {} : { problem: `${path} can't be read (${code ?? (e as Error).message})` };
+  }
+  if (!text.trim()) return {};
+  let settings: unknown;
+  try {
+    settings = JSON.parse(text);
+  } catch (e) {
+    return { problem: `${path} is not valid JSON (${(e as Error).message})` };
+  }
+  if (!settings || typeof settings !== "object" || Array.isArray(settings)) return { problem: `${path} is not a JSON object` };
+  return { settings: settings as Settings };
+}
+
+/** What's wrong with the settings files that count for a session root: one line per file that can't be used. */
+export function settingsProblems(root: string): string[] {
+  const { managed, others } = settingsPaths(root);
+  return [...managed, ...others].flatMap((path) => readSettings(path).problem ?? []);
+}
+
+/**
+ * The tool's rules in these files, per behavior. A file that is there but can't be read or parsed
+ * goes in `invalid`: claude skips such a file, but its deny rules would then be lost without a word.
+ */
 export function loadRules(managed: string[], others: string[], tool: ShellTool): Rules {
   const rules: Rules = { allow: [], ask: [], deny: [] };
   let managedOnly = false;
   for (const path of [...managed, ...others]) {
-    let settings: { permissions?: Record<string, unknown>; allowManagedPermissionRulesOnly?: unknown };
-    try { settings = JSON.parse(readFileSync(path, "utf8")); } catch { continue; }
-    if (!settings || typeof settings !== "object") continue;
+    const { settings, problem } = readSettings(path);
+    if (problem) (rules.invalid ??= []).push(problem);
+    if (!settings) continue;
     const isManaged = managed.includes(path);
     if (isManaged && settings.allowManagedPermissionRulesOnly === true) managedOnly = true;
     const permissions = settings.permissions;
@@ -229,7 +261,8 @@ function commandsIn(command: string, tool: ShellTool): SimpleCommand[] | undefin
  * a Place that also says where the shell is now), removing a critical path asks, or is refused in
  * auto and dontAsk mode (critical.ts). Allow rules match only a plain single command, in modes where
  * Claude would let them approve outright; in auto mode only narrow ones. A read-only Bash command
- * (readonly.ts) is approved in the modes where Claude Code runs its own without asking. A Bash
+ * (readonly.ts) is approved in the modes where Claude Code runs its own without asking. While a
+ * settings file can't be used, nothing is approved, and everything not refused is asked about. A Bash
  * command the lexer can't split is denied when deny rules exist, since none can be ruled out; a
  * PowerShell command that isn't plain is asked about instead.
  */
@@ -255,6 +288,11 @@ export function evaluate(command: string, mode: string | undefined, rules: Rules
     return mode === "auto" || mode === "dontAsk"
       ? { decision: "deny", reason: `${reason}, and ${mode} mode doesn't ask before removing one. Remove the specific files instead, or ask the user to run the command` }
       : { decision: "ask", reason: `${reason}, so removing it needs the user's approval` };
+  }
+  if (rules.invalid?.length) {
+    // The broken file may hold deny rules, so nothing runs on the strength of the rest alone.
+    const files = rules.invalid.join("; ");
+    return asks(mode, { reason: `${files}, so cc-remote can't apply your permission rules; until that's fixed, each ${tool} command needs the user's approval` });
   }
   if (mode && (ALLOW_MODES.includes(mode) || mode === "auto") && rules.allow.length) {
     const words = plainWords(command, tool);

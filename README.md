@@ -313,6 +313,10 @@ wrappers such as `sudo` and `env`. Removing `/`, a top-level directory, your hom
 folder's parents (`rm`, `rmdir`) always asks, and in auto mode is refused; no rule approves it.
 A relative path counts from where the shell is, also after a `cd` in the same command; after a `cd`
 cc-remote can't follow (`cd "$DIR"`), every relative path counts as critical.
+If one of those settings files is there but isn't valid JSON, or can't be read, its rules are
+unknown: Claude Code would skip it, losing its deny rules without a word, so cc-remote instead asks
+before every local shell command (and refuses them in don't-ask mode), naming the file, until it's
+fixed. `cc-remote doctor` also names it.
 
 Read-only commands run without asking in the default, accept-edits, plan and don't-ask modes, as
 Claude Code's own Bash runs them: `ls`, `cat`, `head`, `tail`, `wc`, `grep`/`rg`, `find` without
@@ -363,7 +367,8 @@ between.
 
 **Dropped connections.** A session's claude survives a dropped ssh connection. When the server has
 `python3` 3.6 or later, cc-remote starts claude under a small relay it copies to `~/.cc-remote/bin/`
-there: it runs claude, keeps its output until your machine has it, and waits for cc-remote to come
+there (one file per version; another version's goes once it has gone unused for a week and no
+running session uses it): it runs claude, keeps its output until your machine has it, and waits for cc-remote to come
 back. cc-remote sends a heartbeat every 10 seconds; when the link has been silent for 45 seconds
 (`CC_REMOTE_LINK_TIMEOUT`) or ssh exits, it reconnects on a connection of its own, at once and then
 every few seconds, and the stream goes on where it was. Nothing your client or claude sent is lost

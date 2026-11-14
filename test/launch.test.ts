@@ -1,9 +1,10 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { checkScript, missingIn, readyFields } from "../src/host-files";
 import type { HostProcess } from "../src/host-process";
+import { RELAY_PATH, RELAY_SOURCE } from "../src/relay";
 import { projectKey } from "../src/sessions";
 import { hostDir, launch, rsh, spawner, teamsOff, type Upload } from "../src/ssh";
 import { archive } from "../src/tar";
@@ -337,6 +338,53 @@ describe("the check", () => {
     const r = Bun.spawnSync(["sh", "-c", script], { cwd: home, env: { HOME: home, CLAUDE_CONFIG_DIR: "/etc/claude config", PATH: Bun.env.PATH! } });
     const line = r.stdout.toString().trim();
     expect(readyFields(line.slice("READY-y".length))).toEqual({ home, config: "/etc/claude config", folder: realpathSync(home), version: "2.1.323 (Claude Code)", relay: false });
+  });
+});
+
+describe("old relay scripts", () => {
+  const tokens = { ready: "READY-r", missing: "MISSING-r" };
+  const script = checkScript([{ kind: "relay", remote: RELAY_PATH, data: RELAY_SOURCE }], false, tokens);
+  const days = (n: number) => new Date(Date.now() - n * 86_400_000);
+  /** A host with this version's relay and others', each last used `n` days ago. */
+  function host(ages: Record<string, number>) {
+    const home = mkdtempSync(join(dir, "prune-"));
+    const bin = join(home, dirname(RELAY_PATH));
+    mkdirSync(bin, { recursive: true });
+    for (const [name, age] of Object.entries(ages)) {
+      writeFileSync(join(bin, name), "# relay\n");
+      utimesSync(join(bin, name), days(age), days(age));
+    }
+    return { home, bin, left: () => readdirSync(bin).sort() };
+  }
+  const tag = crypto.randomUUID().slice(0, 8);
+  const current = RELAY_PATH.slice(RELAY_PATH.lastIndexOf("/") + 1);
+
+  test("go once unused for a week, unless a daemon still runs one; this version's is marked used", async () => {
+    const [old, recent, running] = [`relay-old${tag}.py`, `relay-new${tag}.py`, `relay-run${tag}.py`];
+    const h = host({ [current]: 30, [old]: 10, [recent]: 2, [running]: 10 });
+    // A daemon started from an old version's script: its path is in its arguments.
+    const daemon = Bun.spawn(["sh", "-c", "sleep 30", join(h.bin, running)]);
+    try {
+      const r = Bun.spawnSync(["sh", "-c", script], { cwd: h.home, env: { HOME: h.home, PATH: Bun.env.PATH! } });
+      expect(r.stdout.toString()).toStartWith("READY-r\t");
+      expect(readyFields(r.stdout.toString().trim().slice("READY-r".length)).relay).toBe(true);
+      expect(h.left()).toEqual([current, recent, running].sort());
+      expect(Date.now() - statSync(join(h.bin, current)).mtimeMs).toBeLessThan(60_000);
+    } finally {
+      daemon.kill();
+    }
+  });
+
+  test("stay when ps can't tell what runs", () => {
+    const old = `relay-old${tag}.py`;
+    const h = host({ [current]: 1, [old]: 10 });
+    const fake = join(h.home, "fake-bin");
+    mkdirSync(fake);
+    writeFileSync(join(fake, "ps"), "#!/bin/sh\nexit 1\n");
+    chmodSync(join(fake, "ps"), 0o755);
+    const r = Bun.spawnSync(["sh", "-c", script], { cwd: h.home, env: { HOME: h.home, PATH: `${fake}:${Bun.env.PATH}` } });
+    expect(r.stdout.toString()).toStartWith("READY-r\t");
+    expect(h.left()).toEqual([current, old].sort());
   });
 });
 

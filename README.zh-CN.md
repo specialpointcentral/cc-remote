@@ -275,6 +275,9 @@ ask 规则总会询问，bypass（Orca 的 full-access）下也一样；allow �
 项目目录的上级目录（`rm`、`rmdir`）总会询问，在 auto 模式下直接拒绝，任何规则都不能放行。
 相对路径从 shell 当前所在目录算起，同一条命令里的 `cd` 也会跟进；`cd` 到 cc-remote 无法确定的位置
 （如 `cd "$DIR"`）之后，所有相对路径都按关键路径处理。
+如果其中某个 settings 文件存在但不是合法的 JSON，或者读不了，它里面的规则就无从得知。Claude Code 会直接跳过这种文件，
+其中的 deny 规则也就悄悄失效；cc-remote 则会在修好之前对每条本地 shell 命令都先询问（don't-ask 模式下直接拒绝），
+并在提示里写明是哪个文件。`cc-remote doctor` 也会指出它。
 
 只读命令在默认、accept-edits、plan 和 don't-ask 模式下不再询问，和 Claude Code 自己的 Bash 一样：`ls`、
 `cat`、`head`、`tail`、`wc`、`grep`/`rg`、不带 `-exec`/`-delete`/`-fprint` 的 `find`、`git status`/`log`/
@@ -313,7 +316,8 @@ cc-remote 会先把它复制到服务器。在服务器上，每个本地目录�
 这期间客户端发来的内容不会丢失，也不会重复。
 
 **连接断开。** 会话中的 claude 在 ssh 连接断开后会继续运行。服务器上有 `python3` 3.6 或更高版本时，
-cc-remote 会在一个小的中继下启动 claude，中继会被复制到服务器的 `~/.cc-remote/bin/`：它运行 claude，
+cc-remote 会在一个小的中继下启动 claude，中继会被复制到服务器的 `~/.cc-remote/bin/`（每个版本一个文件；其他版本的文件一周没用过、
+也没有正在运行的会话在用时会被删掉）：它运行 claude，
 保存 claude 的输出直到你的机器收到，并等待 cc-remote 回来。cc-remote 每 10 秒发一次心跳；链路 45 秒
 没有任何消息（`CC_REMOTE_LINK_TIMEOUT`）或 ssh 退出时，它会用单独的连接重连，先立即重试，之后每隔几秒
 一次，数据流从断开的地方接着走。客户端和 claude 发出的内容都不会丢失，也不会重复，所以进行中的回合、

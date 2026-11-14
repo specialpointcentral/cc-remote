@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Readable } from "node:stream";
-import { F, type Frame, FrameReader, frame, GONE_TOKEN, ProtocolError, RELAY_HASH, RELAY_PATH, RELAY_SOURCE, RelayClient } from "../src/relay";
+import { F, type Frame, FrameReader, frame, GONE_TOKEN, ProtocolError, RELAY_HASH, RELAY_PATH, RELAY_SOURCE, RelayClient, type RelayEvents } from "../src/relay";
 
 const RELAY = join(import.meta.dir, "..", "src", "relay.py");
 const dir = mkdtempSync(join(tmpdir(), "cc-remote-relay-"));
@@ -171,15 +171,82 @@ describe("RelayClient", () => {
   });
 });
 
+describe("RelayClient monitors", () => {
+  const offset = (n: number) => {
+    const b = new Uint8Array(8);
+    new DataView(b.buffer).setUint32(4, n);
+    return b;
+  };
+  const watchOut = (f: Frame) => [f.value, new DataView(f.payload.buffer, f.payload.byteOffset).getUint32(4), decode(f.payload.subarray(8))];
+
+  test("starts each once, keeps its output until acknowledged, and sends the rest and its end again on a new connection", () => {
+    const sent: Frame[] = [];
+    let reader = new FrameReader();
+    const starts: [number, string][] = [];
+    const closed: number[] = [];
+    let acked = 0;
+    const client = new RelayClient({
+      output() {}, stderr() {}, exit() {},
+      watch: (id, token) => starts.push([id, token]),
+      watchAcked: () => acked++,
+      watchClosed: (id) => closed.push(id),
+    });
+    const connect = () => {
+      reader = new FrameReader();
+      client.connect((b) => sent.push(...reader.push(b)));
+    };
+    connect();
+    client.receive(frame(F.HELLO, 0, text('{"v":1,"watches":[]}')));
+    client.receive(frame(F.WATCH, 4, text("tok")));
+    client.receive(frame(F.WATCH, 4, text("tok")));
+    expect(starts).toEqual([[4, "tok"]]);
+    client.watchOutput(4, text("abc"));
+    client.watchOutput(4, text("def"));
+    client.watchStderr(4, text("warn"));
+    expect(sent.filter((f) => f.type === F.WATCH_OUT).map(watchOut)).toEqual([[4, 0, "abc"], [4, 3, "def"]]);
+    expect(sent.filter((f) => f.type === F.WATCH_ERR).map((f) => decode(f.payload))).toEqual(["warn"]);
+    expect(client.watchPending(4)).toBe(6);
+    client.receive(frame(F.WATCH_ACK, 4, offset(4)));
+    expect(client.watchPending(4)).toBe(2);
+    expect(acked).toBe(1);
+    expect(() => client.receive(frame(F.WATCH_ACK, 4, offset(7)))).toThrow(ProtocolError);
+    client.watchEnd(4, 3);
+    client.watchOutput(4, text("late"));
+    // The link drops before the daemon has the rest: the new connection carries it again.
+    client.disconnect();
+    sent.length = 0;
+    connect();
+    expect(sent.map((f) => f.type)).toEqual([F.HELLO_CLIENT, F.WATCH_OUT, F.WATCH_END]);
+    expect(watchOut(sent[1]!)).toEqual([4, 4, "ef"]);
+    const end = new DataView(sent[2]!.payload.buffer, sent[2]!.payload.byteOffset);
+    expect([sent[2]!.value, end.getUint32(4), end.getInt32(8)]).toEqual([4, 6, 3]);
+    // The daemon's hello names the monitors still running: one it no longer has is closed here.
+    client.receive(frame(F.WATCH, 5, text("t5")));
+    client.receive(frame(F.HELLO, 0, text('{"v":1,"watches":[5]}')));
+    expect(closed).toEqual([4]);
+    expect(client.watchPending(4)).toBe(0);
+    client.receive(frame(F.WATCH_CLOSED, 5));
+    client.receive(frame(F.WATCH_CLOSED, 5));
+    expect(closed).toEqual([4, 5]);
+    // claude's exit closes whatever is left.
+    client.receive(frame(F.WATCH, 6, text("t6")));
+    client.receive(frame(F.EXIT, 0));
+    expect(closed).toEqual([4, 5, 6]);
+    client.receive(frame(F.WATCH, 7, text("t7")));
+    expect(starts.map(([id]) => id)).toEqual([4, 5, 6]);
+  });
+});
+
 describe("relay.py", () => {
   /** A home for the relay's run folders, and a way to talk to it as cc-remote does, over python's stdio. */
-  function host(home = mkdtempSync(join(dir, "home-"))) {
+  function host(home = mkdtempSync(join(dir, "home-")), more: Partial<RelayEvents> = {}) {
     const events = { out: "", err: "", exits: [] as [number | null, string | null][], hellos: 0 };
     const client = new RelayClient({
       output: (b) => (events.out += decode(b)),
       stderr: (b) => (events.err += decode(b)),
       exit: (code, signal) => events.exits.push([code, signal]),
       hello: () => events.hellos++,
+      ...more,
     });
     let current: ChildProcess | undefined;
     const open = (args: string[]) => {
@@ -375,6 +442,55 @@ print(" ".join(sorted(found)))
     expect(alive(daemon)).toBe(false);
     expect(h.runs()).toEqual([]);
   }, SPAWNS);
+
+  test("passes a monitor's command to cc-remote and its output back, across a dropped connection, and closes it when the monitor goes", async () => {
+    const watches: [number, string][] = [];
+    const closed: number[] = [];
+    const h = host(undefined, { watch: (id, token) => watches.push([id, token]), watchClosed: (id) => closed.push(id) });
+    // A claude that runs a monitor process for each line it reads, as its Monitor tool would.
+    const script = 'while read t; do "$CC_REMOTE_PYTHON" -S "$CC_REMOTE_RELAY" monitor "$t" "shown command"; echo "exit:$?"; done';
+    const first = h.open(["run", "m1", "--grace", "30", "--", "sh", "-c", script]);
+    h.client.write(text("aaaaaaaaaaaaaaaa\n"));
+    await until(() => watches.length === 1);
+    const [id, token] = watches[0]!;
+    expect(token).toBe("aaaaaaaaaaaaaaaa");
+    h.client.watchOutput(id, text("line one\n"));
+    await until(() => h.events.out === "line one\n");
+    // Acknowledged once the monitor process has it.
+    await until(() => h.client.watchPending(id) === 0);
+    await h.drop(first);
+    // Its output, and its end, while the link is down.
+    h.client.watchOutput(id, text("line two\n"));
+    h.client.watchEnd(id, 7);
+    const second = h.open(["attach", "m1"]);
+    await until(() => h.events.out.endsWith("exit:7\n"));
+    expect(h.events.out).toBe("line one\nline two\nexit:7\n");
+    await until(() => closed.includes(id));
+
+    // A monitor process that goes, as when claude stops the watch, closes it here.
+    h.client.write(text("bbbbbbbbbbbbbbbb\n"));
+    await until(() => watches.length === 2);
+    const [id2] = watches[1]!;
+    const pid = readdirSync("/proc").filter((p) => /^\d+$/.test(p)).find((p) => {
+      try {
+        return readFileSync(`/proc/${p}/cmdline`, "utf8").includes("monitor\0bbbbbbbbbbbbbbbb");
+      } catch {
+        return false;
+      }
+    });
+    process.kill(Number(pid), "SIGTERM");
+    await until(() => closed.includes(id2));
+    await until(() => h.events.out.endsWith("exit:143\n"));
+    h.client.end();
+    await until(() => h.events.exits.length > 0);
+    expect(await second.closed).toBe(0);
+  }, SPAWNS);
+
+  test("a monitor process outside a relayed claude says so", () => {
+    const r = Bun.spawnSync(["python3", "-S", RELAY, "monitor", "cccccccccccccccc", "x"], { env: { PATH: process.env.PATH ?? "", HOME: dir } });
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr.toString()).toContain("cc-remote: this session's relay is not reachable here (CC_REMOTE_RUN is not set)");
+  });
 
   test("runs commands for cc-remote, and reports a claude that can't start as claude would", async () => {
     const h = host();

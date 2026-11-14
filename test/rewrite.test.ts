@@ -43,9 +43,23 @@ describe("rewriter", () => {
     expect(msg).toEqual({ type: "system", cwd: "/work/app", note: "see /work/app/src/a.ts and /work/apple" });
   });
 
-  test("points transcript mirror frames at the local projects folder", () => {
-    const { msg } = out(session(), { type: "transcript_mirror", filePath: "/home/eric/.claude/projects/-home-eric--cc-remote-ws-box-work-app/s1/subagents/agent-1.jsonl", entries: [] });
-    expect(msg.filePath).toBe(join(projectsDir(), projectKey("/work/app"), "s1/subagents/agent-1.jsonl"));
+  test("writes transcript mirror frames to the local projects folder, in order, instead of passing them on", () => {
+    const iso = isolate();
+    try {
+      const r = rewriter(session());
+      const frame = (rest: string, entries: object[]) =>
+        r.outbound(JSON.stringify({ type: "transcript_mirror", filePath: `/home/eric/.claude/projects/-home-eric--cc-remote-ws-box-work-app/${rest}`, entries }), () => {});
+      expect(frame("s1.jsonl", [{ type: "user", uuid: "u1" }, { type: "assistant", uuid: "a1" }])).toBeNull();
+      expect(frame("s1.jsonl", [{ type: "user", uuid: "u2" }])).toBeNull();
+      expect(frame("s1/subagents/agent-1.jsonl", [{ type: "user", uuid: "s" }, { type: "agent_metadata", agentType: "x" }])).toBeNull();
+      const dir = join(projectsDir(), projectKey("/work/app"));
+      expect(dir.startsWith(iso.home)).toBe(true);
+      expect(readFileSync(join(dir, "s1.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l).uuid)).toEqual(["u1", "a1", "u2"]);
+      expect(readFileSync(join(dir, "s1", "subagents", "agent-1.jsonl"), "utf8")).toBe('{"type":"user","uuid":"s"}\n');
+      expect(JSON.parse(readFileSync(join(dir, "s1", "subagents", "agent-1.meta.json"), "utf8"))).toEqual({ agentType: "x" });
+    } finally {
+      iso.restore();
+    }
   });
 
   test("approves local edits inside the directory under acceptEdits", () => {

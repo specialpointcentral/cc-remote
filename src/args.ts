@@ -1,11 +1,11 @@
 import type { McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { basename, extname, join, resolve } from "node:path";
-import { PREFIX, READS, REMOVED } from "./names";
-import { hostDir, type Upload } from "./ssh";
+import { hostTools, keepsMonitor, PREFIX, READS } from "./names";
+import { hostDir, reconnectGrace, type Upload } from "./ssh";
 
 /** Flags that take several values; as in claude's parser, the values run up to the next flag. */
-const VARIADIC = new Set(["--add-dir", "--mcp-config", "--allowedTools", "--allowed-tools", "--disallowedTools", "--disallowed-tools"]);
+const VARIADIC = new Set(["--add-dir", "--mcp-config", "--allowedTools", "--allowed-tools", "--disallowedTools", "--disallowed-tools", "--tools"]);
 
 /** Flags that take a JSON value or the path of a file holding it. The host can't read the file. */
 const JSON_OR_FILE = new Set(["--settings", "--agents"]);
@@ -72,6 +72,9 @@ export function hostLaunch(argv: string[], cwd: string, stream: boolean): HostLa
   const launch: HostLaunch = { args: out, uploads: [], addDirs: [], mcpServers: {}, strictMcpConfig: false, mode: "default" };
   const allowed: string[] = [];
   const disallowed: string[] = [];
+  // A stream session under the relay keeps claude's Monitor, whose commands run here: its tools are named, not denied.
+  const relayed = stream && reconnectGrace() > 0;
+  let tools: string[] | undefined;
   // From the host folder, up to the host's home: the plugins live there, outside any one project.
   const toHome = "../".repeat(hostDir(cwd).split("/").filter(Boolean).length);
 
@@ -90,6 +93,7 @@ export function hostLaunch(argv: string[], cwd: string, stream: boolean): HostLa
     if (flag === "--add-dir") launch.addDirs.push(...values().map((d) => resolve(cwd, d)));
     else if (flag === "--allowedTools" || flag === "--allowed-tools") allowed.push(...values());
     else if (flag === "--disallowedTools" || flag === "--disallowed-tools") disallowed.push(...values());
+    else if (flag === "--tools" && keepsMonitor(relayed)) (tools ??= []).push(...values());
     else if (flag === "--mcp-config") {
       for (const value of values()) {
         try {
@@ -127,7 +131,9 @@ export function hostLaunch(argv: string[], cwd: string, stream: boolean): HostLa
   // One occurrence each, ours added to the caller's, so nothing depends on how repeats combine.
   if (stream) allowed.push(...READS.map((t) => PREFIX + t));
   if (allowed.length) out.push(`--allowedTools=${allowed.join(",")}`);
-  out.push(`--disallowedTools=${[...disallowed, ...REMOVED].join(",")}`);
+  const host = hostTools(relayed, tools);
+  if (keepsMonitor(relayed)) out.push(`--tools=${host.tools!.join(",")}`);
+  out.push(`--disallowedTools=${[...disallowed, ...host.disallowed].join(",")}`);
   if (stream && !out.includes("--session-mirror")) out.push("--session-mirror");
   return launch;
 }

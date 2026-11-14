@@ -1,14 +1,18 @@
 import { homedir } from "node:os";
 import { isAbsolute, resolve } from "node:path";
 import type { HostFiles } from "../host-fs";
+import type { Monitors } from "../monitor";
 
 export const home = homedir();
 
 /**
  * One session's directories: relative paths resolve against root; Bash's cwd follows its `cd`s.
- * `host` knows the host's own files (host-fs.ts) once the session's claude has started.
+ * `host` knows the host's own files (host-fs.ts) once the session's claude has started. `envFile`
+ * is where the session's SessionStart hooks write `export` lines (CLAUDE_ENV_FILE), which Bash
+ * runs before each command, as Claude Code's own Bash does. `monitors` runs claude's Monitor
+ * commands here, once the session's claude has started under the relay (monitor.ts).
  */
-export type Workspace = { root: string; cwd: string; host?: HostFiles };
+export type Workspace = { root: string; cwd: string; host?: HostFiles; envFile?: string; monitors?: Monitors };
 
 export const workspace = (root: string): Workspace => ({ root, cwd: root });
 

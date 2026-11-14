@@ -2,7 +2,6 @@ import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
 import { LOCAL, PREFIX, widenHooks } from "./names";
 import type { Layer } from "./proxy";
-import { mirrorKey, writeMirror } from "./sessions";
 
 /** An in-process MCP server, as createSdkMcpServer and the bridge make them. */
 export type SdkServer = { instance: { connect(transport: Transport): Promise<void> }; timeout?: number };
@@ -52,8 +51,8 @@ export function initialize(request: Json, served: Record<string, SdkServer>, env
 /**
  * For an SDK that knows nothing of cc-remote, such as the one in Orca, cc-remote plays the part of
  * the SDK for its own servers on the same stream. Their messages are answered here and never
- * reach that SDK; its own servers, hooks and permission prompts pass through as they are. The
- * transcript mirror frames are written to the local projects folder, where it reads sessions.
+ * reach that SDK; its own servers, hooks and permission prompts pass through as they are. (The
+ * proxy writes the transcript mirror frames to the local projects folder, where it reads sessions.)
  *
  * The servers the SDK declares itself win over ours of the same name, except `cc`, the local tools.
  */
@@ -141,18 +140,6 @@ export function sdkHost(servers: Record<string, SdkServer>, environment: string,
       const name = m.request?.server_name;
       if (m.type === "control_request" && m.request.subtype === "mcp_message" && Object.hasOwn(served, name)) {
         void dispatch(m.request_id, name, m.request.message ?? {});
-        return null;
-      }
-    }
-    if (line.includes('"transcript_mirror"')) {
-      const m = JSON.parse(line);
-      if (m.type === "transcript_mirror") {
-        const key = typeof m.filePath === "string" ? mirrorKey(m.filePath) : undefined;
-        try {
-          if (key && Array.isArray(m.entries)) writeMirror(key, m.entries);
-        } catch (e) {
-          console.error(`cc-remote: could not write the local transcript: ${(e as Error).message}`);
-        }
         return null;
       }
     }

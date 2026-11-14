@@ -1,10 +1,10 @@
 import type { Options } from "@anthropic-ai/claude-agent-sdk";
 import { bridgeAll } from "./bridge";
 import { localMcpServers } from "./mcp";
-import { LOCAL, PREFIX, READS, REMOVED, widenHooks } from "./names";
+import { hostTools, keepsMonitor, LOCAL, PREFIX, READS, widenHooks } from "./names";
 import { environment } from "./prompt";
 import { mirror } from "./sessions";
-import { spawner } from "./ssh";
+import { reconnectGrace, spawner } from "./ssh";
 import { localTools } from "./tools";
 import { workspace } from "./tools/util";
 
@@ -32,6 +32,9 @@ export function remote(host: string) {
     const [env, local] = await Promise.all([environment(cwd, options.additionalDirectories ?? []), localMcpServers(cwd)]);
     // Shared by the tools and the stream: the shell's directory, and the host's own files.
     const ws = workspace(cwd);
+    // Claude's Monitor stays under the relay, its commands run here: the built-ins are named, not denied.
+    const relayed = reconnectGrace() > 0;
+    const builtins = hostTools(relayed, Array.isArray(options.tools) ? options.tools : undefined);
     return {
       ...options,
       pathToClaudeCodeExecutable: "claude",
@@ -41,10 +44,12 @@ export function remote(host: string) {
       // The client's servers win over the config's: it chose them for this session.
       mcpServers: { ...bridgeAll({ ...local, ...options.mcpServers }, cwd, options.abortController?.signal), cc: localTools(ws) },
       toolAliases: { ...options.toolAliases, ...Object.fromEntries(LOCAL.map((t) => [t, PREFIX + t])) },
-      disallowedTools: [...(options.disallowedTools ?? []), ...REMOVED],
+      ...(keepsMonitor(relayed) ? { tools: builtins.tools } : {}),
+      disallowedTools: [...(options.disallowedTools ?? []), ...builtins.disallowed],
       // claude asks before any MCP tool; it never asks before its own reads.
       allowedTools: [...(options.allowedTools ?? []), ...READS.map((t) => PREFIX + t)],
       hooks: widenHooks(options.hooks),
+      // The store only turns claude's mirror on: the proxy writes the frames itself, in stream order.
       ...(options.persistSession === false ? {} : { sessionStore: mirror }),
     };
   };

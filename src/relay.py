@@ -14,11 +14,21 @@
 #   relay reap <session id>
 #       Stops the daemons recorded for that session, claude and all, and waits for them: a new
 #       claude for the same session must not write its transcript beside an old one.
+#   relay monitor <token> [<command>]
+#       What a Monitor command of claude's runs instead (cc-remote's PreToolUse hook rewrites it):
+#       asks the daemon of $CC_REMOTE_RUN to have cc-remote run the command it approved under
+#       <token> on its own machine, then copies the command's stdout and stderr to its own, and
+#       exits with its status. <command> is only there for whoever reads the command line.
 #
 # The bridge only copies bytes. The daemon and cc-remote speak in frames: a header of type (1
 # byte), value (8 bytes) and payload length (4 bytes), big-endian, then the payload. Byte offsets
 # are the sequence numbers: the daemon keeps claude's output until cc-remote acknowledges it and
 # replays the rest after a reconnect; cc-remote does the same with claude's input. See relay.ts.
+#
+# A monitor's output flows the other way, from cc-remote through the daemon to the monitor
+# process, and the same way: cc-remote keeps it until the daemon acknowledges it, and the daemon
+# acknowledges only what the monitor process keeps up with. claude runs with CC_REMOTE_RUN,
+# CC_REMOTE_PYTHON and CC_REMOTE_RELAY set, which a monitor command finds the daemon by.
 #
 # Kept stable across versions, since a newer cc-remote may reap the daemon of an older one: the
 # run folder's layout (`s`, `pid`, `session`, `host`) and the daemon stopping everything on SIGTERM.
@@ -40,8 +50,14 @@ HEADER = struct.Struct(">BQI")
 
 # Daemon to cc-remote.
 OUT, ERR, IN_ACK, PONG, HELLO, EXIT, RESULT, FATAL = 1, 2, 3, 4, 5, 6, 7, 8
+WATCH, WATCH_ACK, WATCH_CLOSED = 9, 10, 11
 # cc-remote to daemon.
 IN, OUT_ACK, PING, CHELLO, CLOSE_IN, TERM, BYE, EXEC = 16, 17, 18, 19, 20, 21, 22, 23
+WATCH_OUT, WATCH_ERR, WATCH_END = 24, 25, 26
+# A monitor process to the daemon; the daemon answers it with WATCH_OUT, WATCH_ERR and WATCH_END.
+WATCH_OPEN = 32
+OFFSET = struct.Struct(">Q")
+END = struct.Struct(">Qi")
 
 PROTOCOL = 1
 # What attach exits with, and prints on stderr, when there is no daemon to attach to.
@@ -63,6 +79,8 @@ EXEC_TIMEOUT = 120
 # Results of finished host commands kept for a resent request, the small ones only.
 RESULTS_KEPT = 32
 RESULT_KEPT_MAX = 64 << 10
+# Where this script is, for the monitor commands claude runs: claude's daemon changes directory.
+SCRIPT = os.path.abspath(__file__)
 
 
 def run_root():
@@ -206,6 +224,7 @@ class Conn(object):
         self.last = now
         self.sent = 0
         self.exit_sent = False
+        self.watch = None  # the Watch, on a monitor process's connection
 
     def fileno(self):
         return self.sock.fileno()
@@ -215,6 +234,18 @@ class Conn(object):
             self.sock.close()
         except OSError:
             pass
+
+
+class Watch(object):
+    """A monitor process's command, which cc-remote runs: its output so far, and what was acknowledged."""
+
+    def __init__(self, ident, conn, token):
+        self.ident = ident
+        self.conn = conn
+        self.token = token
+        self.received = 0  # bytes of the command's stdout passed on to the monitor process
+        self.acked = -1  # what cc-remote was last told it may drop; -1 until it's told on this connection
+        self.ended = False
 
 
 class Daemon(object):
@@ -255,6 +286,8 @@ class Daemon(object):
         self.done = {}
         self.done_order = []
         self.undelivered = []
+        self.watches = {}
+        self.next_watch = 1
         self.wake_r, self.wake_w = os.pipe()
         os.set_blocking(self.wake_r, False)
         os.set_blocking(self.wake_w, False)
@@ -289,9 +322,11 @@ class Daemon(object):
         sweep(self.folder)
 
     def spawn(self, command):
+        env = dict(os.environ)
+        env.update(CC_REMOTE_RUN=self.folder, CC_REMOTE_PYTHON=sys.executable or "python3", CC_REMOTE_RELAY=SCRIPT)
         return subprocess.Popen(
             command, cwd=self.cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            start_new_session=True, close_fds=True)
+            start_new_session=True, close_fds=True, env=env)
 
     def on_signal(self, signum, frame_):
         self.stopping = True
@@ -423,6 +458,8 @@ class Daemon(object):
             self.detached_at = now
         elif conn in self.waiting:
             self.waiting.remove(conn)
+        elif conn.watch is not None:
+            self.close_watch(conn.watch)
 
     def receive(self, conn, now):
         try:
@@ -433,6 +470,8 @@ class Daemon(object):
             data = b""
         if not data:
             self.drop(conn, now)
+            return
+        if conn.watch is not None:
             return
         conn.last = now
         conn.rbuf += data
@@ -458,8 +497,11 @@ class Daemon(object):
         self.drop(conn, now)
 
     def handle(self, conn, kind, value, payload, now):
-        """One frame; False when the connection was dropped."""
+        """One frame; False when the connection was dropped, or is no longer cc-remote's."""
         if not conn.ready:
+            if kind == WATCH_OPEN and valid_id(payload.decode("ascii", "replace")):
+                self.open_watch(conn, payload)
+                return False
             if kind != CHELLO:
                 self.drop(conn, now)
                 return False
@@ -472,8 +514,12 @@ class Daemon(object):
             self.conn = conn
             conn.ready = True
             conn.sent = value
-            hello = json.dumps({"v": PROTOCOL, "pid": os.getpid()}).encode()
+            # The monitors still running; cc-remote stops any other it runs for this daemon.
+            hello = json.dumps({"v": PROTOCOL, "pid": os.getpid(), "watches": sorted(self.watches)}).encode()
             conn.wbuf += frame(HELLO, self.in_recv, hello)
+            for watch in self.watches.values():
+                conn.wbuf += frame(WATCH, watch.ident, watch.token)
+                watch.acked = -1
             if self.err_pending:
                 conn.wbuf += frame(ERR, self.err_offset - len(self.err_pending), bytes(self.err_pending))
                 self.err_pending = bytearray()
@@ -505,6 +551,8 @@ class Daemon(object):
             self.bye = True
         elif kind == EXEC:
             self.exec(conn, value, payload)
+        elif kind in (WATCH_OUT, WATCH_ERR, WATCH_END):
+            self.watch_frame(kind, value, payload)
         return True
 
     def send(self, conn, now):
@@ -530,6 +578,69 @@ class Daemon(object):
 
     def wants_send(self, conn):
         return bool(conn.wbuf) or conn.sent < self.out_total or (self.status is not None and not conn.exit_sent)
+
+    # Monitor commands, which cc-remote runs on its own machine for the monitor processes here.
+
+    def open_watch(self, conn, token):
+        self.waiting.remove(conn)
+        watch = Watch(self.next_watch, conn, token)
+        self.next_watch += 1
+        self.watches[watch.ident] = watch
+        conn.watch = watch
+        if self.conn is not None and self.conn.ready:
+            self.conn.wbuf += frame(WATCH, watch.ident, token)
+
+    def watching(self, conn):
+        """Whether a connection is a running monitor's."""
+        return conn.watch is not None and self.watches.get(conn.watch.ident) is conn.watch
+
+    def close_watch(self, watch):
+        """The monitor process is gone, or has its end: cc-remote stops the command, if it still runs."""
+        if self.watches.pop(watch.ident, None) is None:
+            return
+        watch.conn.close()
+        if self.conn is not None and self.conn.ready:
+            self.conn.wbuf += frame(WATCH_CLOSED, watch.ident)
+
+    def watch_frame(self, kind, ident, payload):
+        watch = self.watches.get(ident)
+        if watch is None or watch.ended:
+            return
+        if kind == WATCH_ERR:
+            watch.conn.wbuf += frame(WATCH_ERR, 0, payload)
+            return
+        if len(payload) < OFFSET.size:
+            return
+        (offset,) = OFFSET.unpack_from(payload)
+        if kind == WATCH_END:
+            if len(payload) >= END.size and offset == watch.received:
+                watch.conn.wbuf += frame(WATCH_END, END.unpack_from(payload)[1] & 0xff)
+                watch.ended = True
+            return
+        data = payload[OFFSET.size:]
+        if offset > watch.received or offset + len(data) <= watch.received:
+            return
+        watch.conn.wbuf += frame(WATCH_OUT, 0, data[watch.received - offset:])
+        watch.received = offset + len(data)
+
+    def send_watch(self, conn, now):
+        try:
+            n = conn.sock.send(conn.wbuf)
+        except OSError as e:
+            if e.errno in (errno.EAGAIN, errno.EINTR):
+                return
+            self.drop(conn, now)
+            return
+        del conn.wbuf[:n]
+        if not conn.wbuf and conn.watch.ended:
+            self.close_watch(conn.watch)
+
+    def ack_watches(self):
+        """Lets cc-remote drop what the monitor processes keep up with, and send them more."""
+        for watch in self.watches.values():
+            if watch.received != watch.acked and len(watch.conn.wbuf) < SEND_AHEAD:
+                self.conn.wbuf += frame(WATCH_ACK, watch.ident, OFFSET.pack(watch.received))
+                watch.acked = watch.received
 
     # Commands cc-remote runs on the host over this connection, such as reading a plan file.
 
@@ -613,9 +724,15 @@ class Daemon(object):
             if attached and self.ack_due:
                 self.conn.wbuf += frame(IN_ACK, self.in_recv)
                 self.ack_due = False
+            if attached:
+                self.ack_watches()
 
             readers = [self.lsock, self.wake_r] + self.waiting
             writers = []
+            for watch in self.watches.values():
+                readers.append(watch.conn)
+                if watch.conn.wbuf:
+                    writers.append(watch.conn)
             if self.out_fd is not None and len(self.out_buf) < OUT_CAP:
                 readers.append(self.out_fd)
             if self.err_fd is not None:
@@ -647,13 +764,15 @@ class Daemon(object):
                     self.read_output()
                 elif item == self.err_fd:
                     self.read_errors()
-                elif isinstance(item, Conn) and (item is self.conn or item in self.waiting):
+                elif isinstance(item, Conn) and (item is self.conn or item in self.waiting or self.watching(item)):
                     self.receive(item, now)
             for item in writable:
                 if item == self.in_fd and self.in_fd is not None:
                     self.write_input()
                 elif item is self.conn and self.conn is not None:
                     self.send(item, now)
+                elif isinstance(item, Conn) and self.watching(item):
+                    self.send_watch(item, now)
 
     def finish(self):
         """Leaves nothing behind: claude's group, the connections, the run folder."""
@@ -670,6 +789,8 @@ class Daemon(object):
             self.conn.close()
         for conn in self.waiting:
             conn.close()
+        for watch in list(self.watches.values()):
+            watch.conn.close()
         try:
             self.lsock.close()
         except OSError:
@@ -833,12 +954,50 @@ def reap(argv):
             sys.stderr.write("cc-remote relay: an earlier claude for session %s did not stop in time\n" % session)
 
 
+def monitor(argv):
+    if not argv or not valid_id(argv[0]):
+        raise SystemExit("relay: usage: monitor <token> [<command>]")
+    folder = os.environ.get("CC_REMOTE_RUN", "")
+    try:
+        if not folder:
+            raise OSError(errno.ENOENT, "CC_REMOTE_RUN is not set")
+        os.chdir(folder)
+        sock = connect("s")
+        sock.sendall(frame(WATCH_OPEN, 0, argv[0].encode()))
+    except OSError as e:
+        sys.stderr.write("cc-remote: this session's relay is not reachable here (%s)\n" % (e.strerror or e))
+        sys.exit(1)
+    buf = bytearray()
+    try:
+        while True:
+            data = sock.recv(CHUNK)
+            if not data:
+                break
+            buf += data
+            while len(buf) >= HEADER.size:
+                kind, value, length = HEADER.unpack_from(buf)
+                if len(buf) < HEADER.size + length:
+                    break
+                payload = bytes(buf[HEADER.size:HEADER.size + length])
+                del buf[:HEADER.size + length]
+                if kind == WATCH_OUT:
+                    write_all(1, payload)
+                elif kind == WATCH_ERR:
+                    write_all(2, payload)
+                elif kind == WATCH_END:
+                    os._exit(value)
+    except OSError:
+        os._exit(1)
+    sys.stderr.write("cc-remote: the session's relay ended before the command did\n")
+    os._exit(1)
+
+
 def main():
     if sys.version_info < (3, 6):
         sys.stderr.write("cc-remote relay needs Python 3.6 or later\n")
         sys.exit(2)
     if len(sys.argv) < 2:
-        raise SystemExit("relay: usage: run|attach|reap ...")
+        raise SystemExit("relay: usage: run|attach|reap|monitor ...")
     command, argv = sys.argv[1], sys.argv[2:]
     if command == "run":
         run(argv)
@@ -846,6 +1005,8 @@ def main():
         attach(argv)
     elif command == "reap":
         reap(argv)
+    elif command == "monitor":
+        monitor(argv)
     else:
         raise SystemExit("relay: unknown command %s" % command)
 

@@ -366,6 +366,29 @@ Then reply with only the text you read from local-only.txt.`);
     expect(out).not.toBe("");
   }, 90_000);
 
+  test("Monitor runs its command on this machine, its prompt shows that command, and its output reaches Claude", async () => {
+    expect(chat).not.toBe("");
+    // The local-only file's text is in an earlier reply already: only what comes from here on counts.
+    const earlier = new Set(((await page(chat)).items ?? []).map((i: any) => i.itemId));
+    const t = await turn(chat, `Now a test of the Monitor tool. Use the Monitor tool once, with exactly this command: cat local-only.txt; printf 'monitor-ran\\n' > monitor-proof.txt
+Give it the description "local check" and timeout_ms 60000. When its output arrives, reply with only the lines it printed.`);
+    // An event wakes Claude for a reply of its own, which may come after the turn that started the watch.
+    const reached = await waitFor("the monitor's output to reach Claude", 90, async () =>
+      ((await page(chat)).items ?? []).filter((i: any) => isAssistant(i) && !earlier.has(i.itemId)).some((i: any) => bodyText(i.body).includes(secret))).catch(() => false);
+    const proof = join(project, "monitor-proof.txt");
+    const local = existsSync(proof) ? readFileSync(proof, "utf8") : "(missing)";
+    const sees = hostSees(proof);
+    const prompts = t.approvals.filter((a) => JSON.stringify(a.body).includes("monitor-proof"));
+    const shown = prompts.length > 0 && prompts.every((a) => !JSON.stringify(a.body).includes("CC_REMOTE_PYTHON"));
+    const ok = local === "monitor-ran\n" && !sees.includes("SAME") && !sees.includes("MAPPED") && reached && shown && prompts.every((a) => a.ok);
+    record("monitor", ok ? "pass" : "fail", `monitor-proof.txt locally: ${JSON.stringify(local)}; on the host: ${sees.filter((s) => s !== "WS").join(",") || "absent"}; the local-only file's text ${reached ? "reached" : "did NOT reach"} Claude as an event; ${prompts.length ? `Orca asked ${JSON.stringify(prompts[0].title)} showing ${shown ? "the command Claude asked for" : "the REWRITTEN command"}, answered "${prompts[0].chose}"` : `no prompt for the command reached Orca (${t.approvals.length} prompts in all)`}; tools seen: ${t.tools.join(", ") || "?"}`);
+    expect(local).toBe("monitor-ran\n");
+    expect(sees).not.toContain("SAME");
+    expect(sees).not.toContain("MAPPED");
+    expect(reached).toBe(true);
+    expect(shown).toBe(true);
+  }, 300_000);
+
   /** The host's claude processes for the chat's session (argv[0] claude, the session id in its arguments). */
   const hostClaudes = () => marked(token).filter((p) => p.argv[0]?.split("/").pop() === "claude" && p.argv.some((a) => a.includes(providerSession)));
 

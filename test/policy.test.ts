@@ -7,10 +7,13 @@ import { PassThrough } from "node:stream";
 import type { ChildProcess } from "node:child_process";
 import { sdkHost } from "../src/control";
 import { resetLocalSettings } from "../src/local-settings";
+import type { WatchLink } from "../src/host-process";
+import { Monitors } from "../src/monitor";
 import { HOOK_ID, withPolicyHook } from "../src/policy";
 import { proxy, rewriter, type Session } from "../src/proxy";
 import { settingsLocations } from "../src/rules";
 import { localTools } from "../src/tools";
+import { workspace } from "../src/tools/util";
 
 const base = realpathSync(mkdtempSync(join(tmpdir(), "cc-remote-policy-")));
 // Claude's settings, git's global config and the home directory are all temporary here.
@@ -67,11 +70,11 @@ describe("the policy hook on the stream", () => {
     const { r } = stream(session());
     const init = { type: "control_request", request_id: "i", request: { subtype: "initialize", hooks: { PreToolUse: [{ matcher: "Edit", hookCallbackIds: ["hook_0"] }], Stop: [{ hookCallbackIds: ["hook_1"] }] } } };
     const once = JSON.parse(r.inbound(JSON.stringify(init)));
-    expect(once.request.hooks.PreToolUse).toEqual([{ matcher: "Edit", hookCallbackIds: ["hook_0"] }, { matcher: "mcp__cc__Bash|mcp__cc__Write|mcp__cc__Edit|mcp__cc__NotebookEdit|Agent|Task", hookCallbackIds: [HOOK_ID] }]);
+    expect(once.request.hooks.PreToolUse).toEqual([{ matcher: "Edit", hookCallbackIds: ["hook_0"] }, { matcher: "mcp__cc__Bash|mcp__cc__Write|mcp__cc__Edit|mcp__cc__NotebookEdit|Agent|Task|Monitor", hookCallbackIds: [HOOK_ID] }]);
     expect(once.request.hooks.Stop).toEqual([{ hookCallbackIds: ["hook_1"] }]);
     expect(withPolicyHook(once.request)).toBe(once.request);
     const bare = JSON.parse(r.inbound(JSON.stringify({ type: "control_request", request_id: "j", request: { subtype: "initialize" } })));
-    expect(bare.request.hooks).toEqual({ PreToolUse: [{ matcher: "mcp__cc__Bash|mcp__cc__Write|mcp__cc__Edit|mcp__cc__NotebookEdit|Agent|Task", hookCallbackIds: [HOOK_ID] }] });
+    expect(bare.request.hooks).toEqual({ PreToolUse: [{ matcher: "mcp__cc__Bash|mcp__cc__Write|mcp__cc__Edit|mcp__cc__NotebookEdit|Agent|Task|Monitor", hookCallbackIds: [HOOK_ID] }] });
   });
 
   test("answers its own callbacks from the rules in claude's mode, and passes the SDK's on", () => {
@@ -213,6 +216,83 @@ function fakeClaude() {
   return { child: child as unknown as ChildProcess, received, say: (m: object) => child.stdout.write(`${JSON.stringify(m)}\n`) };
 }
 
+describe("Monitor", () => {
+  const idle: WatchLink = { serve() {}, output() {}, stderr() {}, end() {}, pending: () => 0 };
+  /** A session whose claude runs under the relay, so its Monitor commands run here. */
+  const relayed = (mode = "default"): Session => {
+    const ws = workspace(project);
+    ws.monitors = new Monitors(ws, idle);
+    return { ...session(mode), ws };
+  };
+  const RELAYED = /^"\$CC_REMOTE_PYTHON" -S "\$CC_REMOTE_RELAY" monitor [0-9a-f]{32} /;
+
+  test("without the relay, Monitor is refused with what to do instead", () => {
+    const { hook, last } = stream(session());
+    hook("Monitor", { command: "tail -f log", description: "log", timeout_ms: 1000 });
+    expect(last().response.hookSpecificOutput.permissionDecision).toBe("deny");
+    expect(last().response.hookSpecificOutput.permissionDecisionReason).toContain("needs python3 3.6 or later on the server");
+  });
+
+  test("a command gets the shell rules' decision and runs as a monitor process of the relay's; a WebSocket too", () => {
+    const { hook, last } = stream(relayed());
+    const out = (tool_input: object, mode = "default") => {
+      hook("Monitor", { description: "d", timeout_ms: 1000, ...tool_input }, mode);
+      return last().response.hookSpecificOutput;
+    };
+    expect(out({ command: "rm -rf build" })).toEqual({ hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: "cc-remote: the permission rule Bash(rm:*) denies this command" });
+    const allowed = out({ command: "npm test" });
+    expect(allowed.permissionDecision).toBe("allow");
+    expect(allowed.updatedInput).toEqual({ description: "d", timeout_ms: 1000, command: expect.stringMatching(RELAYED) });
+    expect(allowed.updatedInput.command).toEndWith(" 'npm test'");
+    expect(out({ command: "git push origin main" }).permissionDecision).toBe("ask");
+    const open = out({ command: "npm run dev" });
+    expect(open.permissionDecision).toBeUndefined();
+    expect(open.updatedInput.command).toMatch(RELAYED);
+    expect(out({ command: "npm run dev" }, "auto").permissionDecision).toBeUndefined();
+    const socket = out({ ws: { url: "ws://localhost:3000/" } });
+    expect(socket.permissionDecision).toBeUndefined();
+    expect(socket.updatedInput.ws).toBeUndefined();
+    expect(socket.updatedInput.command).toEndWith(" 'ws://localhost:3000/'");
+  });
+
+  test("a prompt shows what the model asked for, offers the shell's always-allow, and the answer runs the rewritten call", () => {
+    const s = relayed();
+    const { r, hook, last, out } = stream(s);
+    const askFor = (command: string) => {
+      hook("Monitor", { command, description: "d", timeout_ms: 1000 });
+      const rewritten = last().response.hookSpecificOutput.updatedInput;
+      const passed = out({ type: "control_request", request_id: `m-${command}`, request: { subtype: "can_use_tool", tool_name: "Monitor", input: rewritten, tool_use_id: "t", permission_suggestions: [{ type: "addRules", rules: [{ toolName: "Bash", ruleContent: "\"$CC_REMOTE_PYTHON\" -S:*" }], behavior: "allow", destination: "localSettings" }] } });
+      return { rewritten, passed: passed.request };
+    };
+    const answer = (command: string, response: object) =>
+      JSON.parse(r.inbound(JSON.stringify({ type: "control_response", response: { subtype: "success", request_id: `m-${command}`, response } }))).response.response;
+
+    const dev = askFor("npm run dev");
+    expect(dev.passed.input).toEqual({ command: "npm run dev", description: "d", timeout_ms: 1000 });
+    expect(dev.passed.permission_suggestions).toEqual([{ type: "addRules", rules: [{ toolName: "Bash", ruleContent: "npm run:*" }], behavior: "allow", destination: "localSettings" }]);
+    expect(answer("npm run dev", { behavior: "allow", updatedInput: dev.passed.input })).toEqual({ behavior: "allow", updatedInput: dev.rewritten });
+    // Answered once: a second answer with the same id is no longer ours to change.
+    expect(answer("npm run dev", { behavior: "allow", updatedInput: dev.passed.input }).updatedInput).toEqual(dev.passed.input);
+
+    const edited = askFor("npm start");
+    const changed = answer("npm start", { behavior: "allow", updatedInput: { ...edited.passed.input, command: "npm start -- --port 4000" } }).updatedInput;
+    expect(changed.command).toMatch(RELAYED);
+    expect(changed.command).toEndWith(" 'npm start -- --port 4000'");
+    expect(s.ws!.monitors!.find(changed)!.input.command).toBe("npm start -- --port 4000");
+
+    const push = askFor("git push origin main");
+    expect(push.passed.input.command).toBe("git push origin main");
+    expect(push.passed.permission_suggestions).toBeUndefined();
+    expect(push.passed.suppress_always_allow_rule).toBe(true);
+    expect(push.passed.requires_user_interaction).toBe(true);
+    expect(answer("git push origin main", { behavior: "deny", message: "no" })).toEqual({ behavior: "deny", message: "no" });
+
+    // A Monitor call cc-remote didn't rewrite passes on as it is.
+    const other = { type: "control_request", request_id: "x", request: { subtype: "can_use_tool", tool_name: "Monitor", input: { command: "tail -f log" } } };
+    expect(out(other)).toEqual(other);
+  });
+});
+
 describe("composed with the SDK host of claude-compatible mode", () => {
   test("initialize carries both cc-remote's servers and its hook, and the hook's callbacks never reach the SDK", async () => {
     const { child, received, say } = fakeClaude();
@@ -224,7 +304,7 @@ describe("composed with the SDK host of claude-compatible mode", () => {
     await Bun.sleep(20);
     const init = received.find((m) => m.request?.subtype === "initialize").request;
     expect(init.sdkMcpServers).toEqual(["cc"]);
-    expect(init.hooks.PreToolUse).toEqual([{ matcher: "Write|mcp__cc__Write", hookCallbackIds: ["hook_0"] }, { matcher: "mcp__cc__Bash|mcp__cc__Write|mcp__cc__Edit|mcp__cc__NotebookEdit|Agent|Task", hookCallbackIds: [HOOK_ID] }]);
+    expect(init.hooks.PreToolUse).toEqual([{ matcher: "Write|mcp__cc__Write", hookCallbackIds: ["hook_0"] }, { matcher: "mcp__cc__Bash|mcp__cc__Write|mcp__cc__Edit|mcp__cc__NotebookEdit|Agent|Task|Monitor", hookCallbackIds: [HOOK_ID] }]);
 
     say({ type: "control_request", request_id: "h1", request: { subtype: "hook_callback", callback_id: HOOK_ID, input: { hook_event_name: "PreToolUse", tool_name: "mcp__cc__Bash", tool_input: { command: "rm -rf /" }, permission_mode: "bypassPermissions" } } });
     say({ type: "control_request", request_id: "h2", request: { subtype: "hook_callback", callback_id: "hook_0", input: { hook_event_name: "PreToolUse", tool_name: "mcp__cc__Write", tool_input: {} } } });

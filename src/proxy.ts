@@ -5,9 +5,10 @@ import { createInterface } from "node:readline";
 import { PassThrough, type Readable } from "node:stream";
 import { loadGrants, saveGrants } from "./grants";
 import type { LocalHooks } from "./hooks";
+import type { Approval, Monitors } from "./monitor";
 import { EDITS, LOCAL, PREFIX, strip } from "./names";
 import { SHELL } from "./platform";
-import { HOOK_ID, policyHook, shellVerdict, withPolicyHook, workspaceEdit } from "./policy";
+import { HOOK_ID, MONITOR, policyHook, shellVerdict, withPolicyHook, workspaceEdit } from "./policy";
 import { type Destination, persistAllowRule, type ShellTool, TrackedSettingsError, type Verdict } from "./rules";
 import { mirrorKey, projectKey, projectsDir, writeMirror } from "./sessions";
 import type { Workspace } from "./tools/util";
@@ -73,6 +74,10 @@ const FILES: string[] = ["localSettings", "projectSettings", "userSettings"] sat
  * decide. claude matches `Bash(...)` rules only on its own shell tools, so cc-remote keeps them:
  * "always allow" goes to the local settings file, as Claude Code's own does, and "allow for this
  * session" stays with the session (grants.ts), also when another claude process takes it up.
+ *
+ * A Monitor call the policy hook pointed at this machine (monitor.ts) asks with what the model
+ * asked for, as claude's own would, and offers the shell's "always allow" for the command; the
+ * answer gets the rewritten input back, or a new one when the person changed what they were shown.
  */
 export function rewriter(s: Session) {
   const hostPath = new RegExp(`(?:/[^"\\\\/\\s]+)*/${escape(jsonText(s.hostDir))}(?=["/\\\\\\s]|$)`, "g");
@@ -80,6 +85,8 @@ export function rewriter(s: Session) {
   const transcripts = join(projectsDir(), projectKey(s.cwd));
   /** This session's shell grants, as allow rules: `Bash(npm test:*)`. */
   const grants = new Set<string>(s.sessionId ? loadGrants(s.sessionId, s.cwd) : []);
+  /** Monitor permission requests passed on with the model's own input, by request id. */
+  const monitorAsks = new Map<string, { monitors: Monitors; approval: Approval }>();
   /** Takes up the session's saved grants, when claude names a session other than the one known. */
   const session = (id: unknown) => {
     if (typeof id !== "string" || !id || id === s.sessionId) return;
@@ -151,6 +158,31 @@ export function rewriter(s: Session) {
       if (m.type !== "control_request" || req?.subtype !== "can_use_tool") return text;
       // Asks that no stored grant may answer, such as a classifier's escalation, go to the user.
       const allow = () => (req.requires_user_interaction ? text : answer(m.request_id, { behavior: "allow", updatedInput: req.input }));
+      /** What claude would suggest approving for a shell command: the command, plus its subcommand. */
+      const offer = (command: string) => {
+        const prefix = commandPrefix(command);
+        return prefix
+          ? [{ type: "addRules", rules: [{ toolName: SHELL, ruleContent: `${prefix}:*` }], behavior: "allow", destination: "localSettings" }]
+          : undefined;
+      };
+      /** The user's ask rule (or a critical path) forced this prompt: no "don't ask again", and a person answers it. */
+      const forced = (reason?: string) => {
+        req.permission_suggestions = undefined;
+        req.suppress_always_allow_rule = true;
+        req.requires_user_interaction = true;
+        if (reason) req.decision_reason ??= `cc-remote: ${reason}`;
+      };
+      if (req.tool_name === MONITOR) {
+        const monitors = s.ws?.monitors;
+        const approval = monitors?.find(req.input);
+        if (!monitors || !approval) return text;
+        monitorAsks.set(m.request_id, { monitors, approval });
+        req.input = approval.input;
+        const command = approval.input.command;
+        if (approval.ask) forced();
+        else req.permission_suggestions = typeof command === "string" ? offer(command) : undefined;
+        return JSON.stringify(m);
+      }
       if (EDITS.includes(req.tool_name)) {
         const target = String(req.input?.file_path ?? req.input?.notebook_path ?? "");
         // The host claude's own plan or memory file, which it edits without asking in any mode.
@@ -173,20 +205,13 @@ export function rewriter(s: Session) {
         if (verdict.decision === "deny") return answer(m.request_id, { behavior: "deny", message: `cc-remote: ${verdict.reason}` });
         if (verdict.decision === "allow") return allow();
         if (verdict.decision === "ask") {
-          // The user's ask rule (or a critical path) forced this prompt, and outranks any allow rule:
-          // no "don't ask again", and a person answers it. An app that approves everything itself in
-          // its own full-access mode, as Orca does, still asks the user for a request marked so.
-          req.permission_suggestions = undefined;
-          req.suppress_always_allow_rule = true;
-          req.requires_user_interaction = true;
-          if (verdict.reason) req.decision_reason ??= `cc-remote: ${verdict.reason}`;
+          // It outranks any allow rule. An app that approves everything itself in its own
+          // full-access mode, as Orca does, still asks the user for a request marked so.
+          forced(verdict.reason);
           return JSON.stringify(m);
         }
         // claude suggests approving the whole tool, as for any MCP tool. Offer the command instead.
-        const prefix = commandPrefix(command);
-        req.permission_suggestions = prefix
-          ? [{ type: "addRules", rules: [{ toolName: SHELL, ruleContent: `${prefix}:*` }], behavior: "allow", destination: "localSettings" }]
-          : undefined;
+        req.permission_suggestions = offer(command);
         return JSON.stringify(m);
       }
     }
@@ -194,6 +219,16 @@ export function rewriter(s: Session) {
   }
 
   function inbound(line: string): string {
+    if (monitorAsks.size && line.includes('"control_response"')) {
+      const m = JSON.parse(line);
+      const asked = monitorAsks.get(m.response?.request_id);
+      if (m.type === "control_response" && asked) {
+        monitorAsks.delete(m.response.request_id);
+        const r = m.response.response;
+        if (r?.behavior === "allow") r.updatedInput = asked.monitors.answered(asked.approval, r.updatedInput);
+        line = JSON.stringify(m);
+      }
+    }
     if (line.includes('"initialize"')) {
       const m = JSON.parse(line);
       if (m.type === "control_request" && m.request?.subtype === "initialize") {

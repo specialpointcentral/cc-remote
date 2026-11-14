@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { hostLaunch } from "../src/args";
 import { forwardedEnv } from "../src/claude";
 import { initialize, sdkHost } from "../src/control";
-import { REMOVED } from "../src/names";
+import { hostTools, REMOVED } from "../src/names";
 import { mirrorKey, projectsDir } from "../src/sessions";
 import { argument, hostDir } from "../src/ssh";
 import { localTools } from "../src/tools";
@@ -52,7 +52,8 @@ describe("hostLaunch", () => {
       `--plugin-dir=${up}${launch.uploads[0]!.remote}`, "--session-id=741f7a4e-c84b-4612-a796-478b87521238", "--replay-user-messages",
       "--thinking-display", "summarized", "--settings", '{"fastMode":false}',
       "--allowedTools=mcp__cc__Read,mcp__cc__Glob,mcp__cc__Grep",
-      `--disallowedTools=${REMOVED.join(",")}`,
+      `--tools=${hostTools(true).tools!.join(",")}`,
+      `--disallowedTools=${hostTools(true).disallowed.join(",")}`,
       "--session-mirror",
     ]);
   });
@@ -78,9 +79,42 @@ describe("hostLaunch", () => {
     expect(launch.args).toEqual([
       "--strict-mcp-config", "--settings", '{"model":"x"}', "--permission-mode=acceptEdits", "--input-format", "stream-json",
       "--allowedTools=Bash(git log:*),mcp__cc__Read,mcp__cc__Glob,mcp__cc__Grep",
-      `--disallowedTools=WebFetch,Task,${REMOVED.join(",")}`,
+      `--tools=${hostTools(true).tools!.join(",")}`,
+      `--disallowedTools=WebFetch,Task,${hostTools(true).disallowed.join(",")}`,
       "--session-mirror",
     ]);
+  });
+
+  test("a stream session names its tools rather than deny Bash, so claude keeps Monitor; not with reconnection off", () => {
+    const flags = (argv: string[], stream = true) => {
+      const args = hostLaunch(argv, "/w", stream).args;
+      const list = (name: string) => args.find((a) => a.startsWith(`${name}=`))?.slice(name.length + 1).split(",").filter(Boolean);
+      return { tools: list("--tools"), disallowed: list("--disallowedTools")!, args };
+    };
+    const stream = flags(["--input-format", "stream-json"]);
+    expect(stream.tools).toContain("Monitor");
+    for (const t of ["WebFetch", "Agent", "Skill", "DesignSync"]) expect(stream.tools).toContain(t);
+    for (const t of [...REMOVED.filter((r) => r !== "Monitor"), "TaskCreate", "TaskList"]) expect(stream.tools).not.toContain(t);
+    // Every other built-in that would act on the host is still denied; Bash, by not being named.
+    expect(stream.disallowed).toEqual(REMOVED.filter((t) => t !== "Bash" && t !== "Monitor"));
+    expect(hostTools(true)).toEqual({ tools: stream.tools, disallowed: stream.disallowed });
+    // The caller's own list, without what would act on the host.
+    expect(flags(["--input-format", "stream-json", "--tools", "Read,Monitor", "WebSearch"]).tools).toEqual(["Monitor", "WebSearch"]);
+    expect(flags(["--input-format", "stream-json", "--tools=default"]).tools).toEqual(stream.tools);
+    expect(flags(["--input-format", "stream-json", "--tools", ""]).tools).toEqual([]);
+    // A one-off, or reconnection off: Bash is denied as before, and Monitor with it.
+    const oneOff = flags(["-p", "--tools", "Read,Grep"], false);
+    expect(oneOff.tools).toBeUndefined();
+    expect(oneOff.args.slice(0, 3)).toEqual(["-p", "--tools", "Read,Grep"]);
+    expect(oneOff.disallowed).toEqual(REMOVED);
+    const grace = Bun.env.CC_REMOTE_RECONNECT_GRACE;
+    Bun.env.CC_REMOTE_RECONNECT_GRACE = "0";
+    try {
+      expect(flags(["--input-format", "stream-json"])).toMatchObject({ tools: undefined, disallowed: REMOVED });
+    } finally {
+      if (grace === undefined) delete Bun.env.CC_REMOTE_RECONNECT_GRACE;
+      else Bun.env.CC_REMOTE_RECONNECT_GRACE = grace;
+    }
   });
 
   test("a one-off -p only loses the host's tools", () => {

@@ -7,7 +7,8 @@ import { grantsSession } from "./grants";
 import { bundle, checkScript, installScript, type Need, type Ready, readyFields } from "./host-files";
 import { HostFiles } from "./host-fs";
 import { sessionHooks } from "./hooks";
-import { HostProcess, type RelayPlan } from "./host-process";
+import { HostProcess, type RelayPlan, type WatchLink } from "./host-process";
+import { Monitors } from "./monitor";
 import { WINDOWS } from "./platform";
 import { projectTrees } from "./project-claude";
 import { proxy } from "./proxy";
@@ -271,8 +272,8 @@ function versionCheck(host: string): { refuse?: string; ask?: string; ready?: (r
  * skills and agents. The remote command checks for them first and starts claude only when they're
  * all there; otherwise cc-remote sends what's missing over one more channel and starts it again.
  * What the SDK writes in the meantime waits for the claude that starts. `found` gets what the check
- * reports about the host's folders, as claude starts, and a way to run commands over the session's
- * relay when it has one.
+ * reports about the host's folders, as claude starts, and, when the session has a relay, a way to
+ * run commands over it and the link its Monitor commands come here by.
  *
  * A stream session (stream-json input, an SDK on the other end) starts claude under the relay,
  * when the host has python3 and CC_REMOTE_RECONNECT_GRACE isn't 0: claude then survives a dropped
@@ -281,7 +282,7 @@ function versionCheck(host: string): { refuse?: string; ask?: string; ready?: (r
  */
 export function launch(
   host: string, cwd: string, args: string[], env: Record<string, string>, uploads: Upload[] = [], signal?: AbortSignal,
-  found?: (where: Ready, exec?: Exec) => void, hostHooks?: Record<string, unknown[]>,
+  found?: (where: Ready, exec?: Exec, watches?: WatchLink) => void, hostHooks?: Record<string, unknown[]>,
 ): HostProcess {
   const needs: Need[] = uploads.map((u) => ({ kind: "plugin", ...u }));
   const grace = reconnectGrace();
@@ -330,7 +331,8 @@ export function launch(
     ready: (rest) => {
       const where = readyFields(rest);
       if (relayed && !where.relay) notice(`${host} has no python3 3.6 or later, so a dropped connection ends the session's claude`);
-      found?.(where, where.relay ? (script, input) => child.exec(script, input) : undefined);
+      if (where.relay) found?.(where, (script, input) => child.exec(script, input), child.watches);
+      else found?.(where);
       return { problem: version.ready?.(where.version), relay: where.relay };
     },
     refuse: version.refuse,
@@ -343,9 +345,14 @@ export function launch(
 /** The host process where the proxy expects a ChildProcess: it uses only what both offer. */
 export const asChild = (host: HostProcess) => host as unknown as ChildProcess;
 
-/** Hands what a launch found about the host's folders to the local tools of the session in `ws`. */
-export const tellTools = (host: string, ws?: Workspace) => (where: Ready, exec?: Exec) => {
-  if (ws) ws.host = HostFiles.from(host, where, exec);
+/**
+ * Hands what a launch found about the host's folders to the local tools of the session in `ws`,
+ * and, under the relay, has its Monitor commands run here.
+ */
+export const tellTools = (host: string, ws?: Workspace) => (where: Ready, exec?: Exec, watches?: WatchLink) => {
+  if (!ws) return;
+  ws.host = HostFiles.from(host, where, exec);
+  ws.monitors = watches && !WINDOWS ? new Monitors(ws, watches) : undefined;
 };
 
 /**

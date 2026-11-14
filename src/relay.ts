@@ -20,8 +20,12 @@ export const GONE_TOKEN = "cc-remote-relay-v1-gone";
 export const F = {
   // Daemon to cc-remote.
   OUT: 1, ERR: 2, IN_ACK: 3, PONG: 4, HELLO: 5, EXIT: 6, RESULT: 7, FATAL: 8,
+  WATCH: 9, WATCH_ACK: 10, WATCH_CLOSED: 11,
   // cc-remote to daemon.
   IN: 16, OUT_ACK: 17, PING: 18, HELLO_CLIENT: 19, CLOSE_IN: 20, TERM: 21, BYE: 22, EXEC: 23,
+  WATCH_OUT: 24, WATCH_ERR: 25, WATCH_END: 26,
+  // A monitor process on the host to the daemon.
+  WATCH_OPEN: 32,
 } as const;
 
 const HEADER = 13;
@@ -70,6 +74,16 @@ export class FrameReader {
 
 export class ProtocolError extends Error {}
 
+/** A watch's end: where its output ends, and its exit status. */
+function watchEnd(id: number, total: number, code: number): Uint8Array {
+  const payload = new Uint8Array(12);
+  const view = new DataView(payload.buffer);
+  view.setUint32(0, Math.floor(total / 2 ** 32));
+  view.setUint32(4, total >>> 0);
+  view.setInt32(8, code);
+  return frame(F.WATCH_END, id, payload);
+}
+
 function concat(parts: Uint8Array[]): Uint8Array {
   const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
   let at = 0;
@@ -94,7 +108,19 @@ export type RelayEvents = {
   hello?(): void;
   /** The daemon refuses to go on with this session. */
   fatal?(message: string): void;
+  /**
+   * A Monitor command of claude's for this machine to run (monitor.ts): its id with this daemon,
+   * and the token cc-remote approved it under. Once per id, however often the daemon asks.
+   */
+  watch?(id: number, token: string): void;
+  /** The daemon has taken some of the output of watch `id`: there may be room for more. */
+  watchAcked?(id: number): void;
+  /** The daemon is done with watch `id`, its monitor process gone or its end delivered: stop it and forget it. */
+  watchClosed?(id: number): void;
 };
+
+/** A watch's output not yet acknowledged, from `base` on, and its exit status once it has one. */
+type WatchState = { base: number; total: number; queue: Uint8Array[]; end?: number };
 
 /**
  * cc-remote's side of the relay protocol, apart from any connection: what has arrived of claude's
@@ -121,6 +147,7 @@ export class RelayClient {
   private reader = new FrameReader();
   private execs = new Map<number, { request: Uint8Array; resolve(r: ExecResult): void; reject(e: Error): void }>();
   private nextExec = 1;
+  private watches = new Map<number, WatchState>();
 
   constructor(private readonly events: RelayEvents) {}
 
@@ -142,6 +169,14 @@ export class RelayClient {
     if (this.inEnded) send(frame(F.CLOSE_IN, this.inTotal));
     if (this.terminating) send(frame(F.TERM));
     for (const { request } of this.execs.values()) send(request);
+    for (const [id, w] of this.watches) {
+      let at = w.base;
+      for (const chunk of w.queue) {
+        this.sendWatch(id, at, chunk);
+        at += chunk.length;
+      }
+      if (w.end !== undefined) send(watchEnd(id, w.total, w.end));
+    }
   }
 
   /** The connection is gone; nothing more is sent until the next one. */
@@ -169,10 +204,17 @@ export class RelayClient {
       }
       case F.ERR:
         return this.events.stderr(f.payload);
-      case F.HELLO:
+      case F.HELLO: {
         this.acknowledged(f.value);
         this.connected = true;
+        // The daemon's monitors still running: any other was closed while the link was down.
+        let live: unknown;
+        try {
+          live = JSON.parse(new TextDecoder().decode(f.payload)).watches;
+        } catch {}
+        if (Array.isArray(live)) for (const id of [...this.watches.keys()]) if (!live.includes(id)) this.closeWatch(id);
         return this.events.hello?.();
+      }
       case F.IN_ACK:
         return this.acknowledged(f.value);
       case F.PONG:
@@ -184,6 +226,7 @@ export class RelayClient {
         this.send?.(frame(F.BYE));
         const signal = new TextDecoder().decode(f.payload);
         this.failExecs(new Error("claude on the host has exited"));
+        for (const id of [...this.watches.keys()]) this.closeWatch(id);
         return this.events.exit(signal ? null : f.value, (signal || null) as NodeJS.Signals | null);
       }
       case F.RESULT: {
@@ -197,6 +240,28 @@ export class RelayClient {
       }
       case F.FATAL:
         return this.events.fatal?.(new TextDecoder().decode(f.payload));
+      case F.WATCH: {
+        if (this.watches.has(f.value) || this.exited) return;
+        this.watches.set(f.value, { base: 0, total: 0, queue: [] });
+        return this.events.watch?.(f.value, new TextDecoder().decode(f.payload));
+      }
+      case F.WATCH_ACK: {
+        const w = this.watches.get(f.value);
+        if (!w || f.payload.length < 8) return;
+        const view = new DataView(f.payload.buffer, f.payload.byteOffset, 8);
+        const offset = view.getUint32(0) * 2 ** 32 + view.getUint32(4);
+        if (offset > w.total) throw new ProtocolError(`the daemon acknowledges byte ${offset} of ${w.total} of monitor ${f.value}`);
+        while (w.base < offset && w.queue.length) {
+          const first = w.queue[0]!;
+          const drop = Math.min(first.length, offset - w.base);
+          if (drop === first.length) w.queue.shift();
+          else w.queue[0] = first.subarray(drop);
+          w.base += drop;
+        }
+        return this.events.watchAcked?.(f.value);
+      }
+      case F.WATCH_CLOSED:
+        return this.closeWatch(f.value);
       default:
         throw new ProtocolError(`an unknown frame type ${f.type}`);
     }
@@ -270,6 +335,51 @@ export class RelayClient {
       this.execs.set(id, { request, resolve, reject });
       this.send?.(request);
     });
+  }
+
+  private closeWatch(id: number) {
+    if (this.watches.delete(id)) this.events.watchClosed?.(id);
+  }
+
+  private sendWatch(id: number, offset: number, chunk: Uint8Array) {
+    for (let at = 0; at < chunk.length; at += IN_CHUNK) {
+      const part = chunk.subarray(at, at + IN_CHUNK);
+      const payload = new Uint8Array(8 + part.length);
+      const view = new DataView(payload.buffer);
+      view.setUint32(0, Math.floor((offset + at) / 2 ** 32));
+      view.setUint32(4, (offset + at) >>> 0);
+      payload.set(part, 8);
+      this.send?.(frame(F.WATCH_OUT, id, payload));
+    }
+  }
+
+  /** stdout of watch `id`, kept until the daemon acknowledges it. */
+  watchOutput(id: number, chunk: Uint8Array) {
+    const w = this.watches.get(id);
+    if (!w || w.end !== undefined || !chunk.length) return;
+    const copy = new Uint8Array(chunk);
+    w.queue.push(copy);
+    this.sendWatch(id, w.total, copy);
+    w.total += copy.length;
+  }
+
+  /** stderr of watch `id`: passed on while connected, and not kept. */
+  watchStderr(id: number, chunk: Uint8Array) {
+    if (this.watches.has(id) && chunk.length) this.send?.(frame(F.WATCH_ERR, id, chunk));
+  }
+
+  /** Watch `id` has exited with `code`, after all of its output. */
+  watchEnd(id: number, code: number) {
+    const w = this.watches.get(id);
+    if (!w || w.end !== undefined) return;
+    w.end = code;
+    this.send?.(watchEnd(id, w.total, code));
+  }
+
+  /** Output of watch `id` the daemon has yet to acknowledge. */
+  watchPending(id: number): number {
+    const w = this.watches.get(id);
+    return w ? w.total - w.base : 0;
   }
 
   /** Fails the commands still waiting for an answer, as the session ends. */

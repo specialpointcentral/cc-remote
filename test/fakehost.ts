@@ -16,7 +16,9 @@ export const TEAMS_OFF = ' [--settings] [{"env":{"CLAUDE_CODE_EXPERIMENTAL_AGENT
  *   stale it never runs `true`;
  * - FAKE_SSH_DOWN: every connection that names ControlPath=none fails, as with no network;
  * - FAKE_SSH_SLOW: seconds a connection that names ControlPath=none takes to come up, as a
- *   handshake over a slow link.
+ *   handshake over a slow link;
+ * - FAKE_CLAUDE_MONITOR: claude runs a line `MONITOR <token>` as its Monitor tool would run a
+ *   command cc-remote rewrote (monitor.ts), and prints `monitor exit <status>` after it.
  *
  * And for setup's checks, all off unless set:
  *
@@ -96,6 +98,15 @@ if [ "$1" = --help ] && [ -n "$FAKE_HELP" ]; then
 fi
 printf 'ARGS'; for a; do printf ' [%s]' "$a"; done; printf '\n'
 printf 'TEAMS=%s\n' "$CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"
+if [ -n "$FAKE_CLAUDE_MONITOR" ]; then
+  while IFS= read -r l; do
+    case "$l" in
+      "MONITOR "*) "$CC_REMOTE_PYTHON" -S "$CC_REMOTE_RELAY" monitor ${"$"}{l#MONITOR } 'the command'; echo "monitor exit $?";;
+      *) printf '%s\n' "$l";;
+    esac
+  done
+  exit 0
+fi
 exec cat
 `);
   chmodSync(claude, 0o755);

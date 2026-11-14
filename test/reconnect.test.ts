@@ -8,10 +8,11 @@ import { RELAY_PATH } from "../src/relay";
 import { checkSharedConnection, hostDir, launch, tellTools } from "../src/ssh";
 import { versionCache } from "../src/version";
 import { fakeHost, TEAMS_OFF } from "./fakehost";
+import { isolate } from "./fixture";
 
 const dir = realpathSync(mkdtempSync(join(tmpdir(), "cc-remote-reconnect-")));
 const host = fakeHost(dir);
-const KEYS = ["CC_REMOTE_SSH", "FAKE_SSH_LOG", "FAKE_HOST_HOME", "FAKE_HOST_CONFIG", "CLAUDE_CONFIG_DIR", "FAKE_CLAUDE_VERSION", "FAKE_MASTER", "FAKE_SSH_DOWN", "FAKE_SSH_SLOW",
+const KEYS = ["CC_REMOTE_SSH", "FAKE_SSH_LOG", "FAKE_HOST_HOME", "FAKE_HOST_CONFIG", "CLAUDE_CONFIG_DIR", "FAKE_CLAUDE_VERSION", "FAKE_MASTER", "FAKE_SSH_DOWN", "FAKE_SSH_SLOW", "FAKE_CLAUDE_MONITOR",
   "CC_REMOTE_RECONNECT_GRACE", "CC_REMOTE_LINK_TIMEOUT", "CC_REMOTE_CONTROL_PERSIST", "CC_REMOTE_KEEPALIVE_TIMEOUT"];
 const saved = { env: Object.fromEntries(KEYS.map((k) => [k, Bun.env[k]])), cache: { ...versionCache } };
 const STREAM = ["--input-format", "stream-json"];
@@ -24,7 +25,7 @@ beforeAll(() => {
 });
 beforeEach(() => {
   host.reset();
-  for (const k of ["FAKE_CLAUDE_VERSION", "FAKE_MASTER", "FAKE_SSH_DOWN", "FAKE_SSH_SLOW", "CC_REMOTE_RECONNECT_GRACE", "CC_REMOTE_LINK_TIMEOUT"]) delete Bun.env[k];
+  for (const k of ["FAKE_CLAUDE_VERSION", "FAKE_MASTER", "FAKE_SSH_DOWN", "FAKE_SSH_SLOW", "FAKE_CLAUDE_MONITOR", "CC_REMOTE_RECONNECT_GRACE", "CC_REMOTE_LINK_TIMEOUT"]) delete Bun.env[k];
   Object.assign(Bun.env, host.env);
   versionCache.dir = mkdtempSync(join(dir, "cache-"));
 });
@@ -285,6 +286,45 @@ describe("a stream session under the relay", () => {
     // Once the session is over, they go over ssh again.
     expect(await ws.host!.read(plan)).toBeInstanceOf(Uint8Array);
     expect(host.calls()).toHaveLength(calls + 1);
+  }, SPAWNS);
+
+  test("runs claude's Monitor commands here, through a dropped connection, and stops them with the session", async () => {
+    // The local shell's login environment comes from a throwaway home.
+    const local = isolate();
+    Bun.env.FAKE_CLAUDE_MONITOR = "1";
+    try {
+      const cwd = project();
+      const ws = workspace(cwd);
+      const s = session(cwd, STREAM, tellTools("box", ws));
+      s.child.stdin.write("x\n");
+      await until(() => s.s.out.endsWith("x\n") && !!ws.monitors);
+      // A file only this machine has.
+      writeFileSync(join(cwd, "local.txt"), "local only\n");
+      const token = (command: string) => /monitor ([0-9a-f]{32}) /.exec(ws.monitors!.approve({ command }).command!)![1];
+      s.child.stdin.write(`MONITOR ${token("cat local.txt; for i in 1 2 3 4 5 6; do echo tick $i; sleep 0.3; done; exit 5")}\n`);
+      await until(() => s.s.out.includes("tick 2"));
+      process.kill(s.child.link!, "SIGKILL");
+      await until(() => s.s.out.endsWith("monitor exit 5\n"));
+      const ticks = [1, 2, 3, 4, 5, 6].map((i) => `tick ${i}\n`).join("");
+      expect(s.s.out).toBe(`${BANNER}x\nlocal only\n${ticks}monitor exit 5\n`);
+      // One still running when the session ends is stopped, its whole process group.
+      const marker = join(cwd, "pid");
+      s.child.stdin.write(`MONITOR ${token(`echo $$ > ${marker}; echo started; sleep 60`)}\n`);
+      await until(() => s.s.out.endsWith("started\n"));
+      const pid = Number(readFileSync(marker, "utf8"));
+      s.child.kill("SIGTERM");
+      await s.done();
+      await until(() => {
+        try {
+          process.kill(pid, 0);
+          return false;
+        } catch {
+          return true;
+        }
+      });
+    } finally {
+      local.restore();
+    }
   }, SPAWNS);
 
   test("a claude too old to use is stopped under the relay too", async () => {

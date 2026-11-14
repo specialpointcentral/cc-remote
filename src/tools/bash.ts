@@ -22,7 +22,7 @@ export const bash = shellTool({
 - Default timeout is 120000ms (2 minutes); max is 600000ms (10 minutes)
 - Output over ${MAX_OUTPUT} characters is truncated
 - The command gets no stdin; avoid interactive commands
-- Set run_in_background for long-running processes such as dev servers. You get back an ID and an output file to Read; the process stops when the session ends
+- Set run_in_background for long-running processes such as dev servers. You get back an ID and an output file to Read; the process stops when the session ends. You are not told when a background command finishes: to hear of each line a command prints, or of its end, run it with the Monitor tool instead, when this session has it
 - Prefer Read, Edit, Write, Glob and Grep over cat, sed, echo >, find and grep for file work
 - Chain dependent commands with &&; make independent calls in parallel in one response`,
   launch: (command, ws) => loginLaunch(script(command, ws.envFile), ws.root),

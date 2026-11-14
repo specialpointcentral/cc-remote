@@ -29,21 +29,50 @@ const signal = (pid: number, name: NodeJS.Signals) => {
 };
 
 /**
+ * Groups sent SIGTERM whose SIGKILL is still to come. Their first process may be gone, and with it
+ * the group from `groups`, while a child that ignores SIGTERM lives on: if cc-remote exits first,
+ * killAll sends that SIGKILL.
+ */
+const dying = new Set<number>();
+
+const alive = (pid: number) => {
+  try {
+    process.kill(-pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+/**
  * Asks a group to stop with SIGTERM, so commands can clean up, and kills whatever is left once the
  * grace period ends. Windows has no such signal; there the tree is killed at once.
  */
 export function stop(pid: number) {
   if (WINDOWS) return void taskkill(pid);
   signal(pid, "SIGTERM");
-  setTimeout(() => signal(pid, "SIGKILL"), stopping.graceMs).unref();
+  dying.add(pid);
+  setTimeout(() => {
+    dying.delete(pid);
+    signal(pid, "SIGKILL");
+  }, stopping.graceMs).unref();
+}
+
+/**
+ * Stops what is left of a group whose first process has exited: children it left in the
+ * background. Nothing on Windows, where the tree is found through that first process.
+ */
+export function stopLeftovers(pid: number) {
+  if (!WINDOWS && alive(pid)) stop(pid);
 }
 
 /**
  * Runs as cc-remote exits, when no timer will fire any more: SIGTERM now, and a detached sh, which
- * outlives us, sends the SIGKILLs after the grace period.
+ * outlives us, sends the SIGKILLs after the grace period, also to groups stopped earlier whose
+ * SIGKILL hadn't come yet.
  */
 export const killAll = () => {
-  const pids = [...groups];
+  const pids = [...new Set([...groups, ...[...dying].filter(alive)])];
   if (WINDOWS) return void pids.forEach(taskkill);
   if (!pids.length) return;
   for (const pid of pids) signal(pid, "SIGTERM");

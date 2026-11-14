@@ -46,6 +46,28 @@ export type Plan = {
   relay?: RelayPlan;
 };
 
+/** Runs the Monitor commands claude on the host asks this machine to run (monitor.ts). */
+export type Watcher = {
+  start(id: number, token: string): void;
+  /** The daemon took some output of `id`: reading may go on. */
+  acked(id: number): void;
+  /** Stop `id`, whose monitor process on the host is gone. */
+  closed(id: number): void;
+  /** The session is over: stop them all. */
+  closeAll(): void;
+};
+
+/** How a session's Monitor commands reach this machine, over the relay. */
+export type WatchLink = {
+  /** Who runs them; set as claude starts, before the daemon can ask for any. */
+  serve(watcher: Watcher): void;
+  output(id: number, chunk: Uint8Array): void;
+  stderr(id: number, chunk: Uint8Array): void;
+  end(id: number, code: number): void;
+  /** Output of `id` the daemon has yet to take; reading stops while there's too much. */
+  pending(id: number): number;
+};
+
 /** After a SIGTERM, how long the host has to report claude's exit before cc-remote goes anyway. */
 export const STOP_WAIT_MS = 2_000;
 
@@ -183,6 +205,16 @@ export class HostProcess extends EventEmitter {
   /** Whether the ssh running now is a start, which may come up under the relay. */
   private starting = false;
   private stopSignal: NodeJS.Signals = "SIGTERM";
+  private watcher?: Watcher;
+
+  /** The session's Monitor commands, which the daemon passes on for this machine to run. */
+  readonly watches: WatchLink = {
+    serve: (watcher) => (this.watcher = watcher),
+    output: (id, chunk) => this.client?.watchOutput(id, chunk),
+    stderr: (id, chunk) => this.client?.watchStderr(id, chunk),
+    end: (id, code) => this.client?.watchEnd(id, code),
+    pending: (id) => this.client?.watchPending(id) ?? 0,
+  };
 
   constructor(private readonly plan: Plan) {
     super();
@@ -394,6 +426,13 @@ export class HostProcess extends EventEmitter {
       },
       hello: () => this.onHello?.(),
       fatal: (message) => this.relayFailed(`cc-remote: ${message}`),
+      watch: (id, token) => {
+        if (this.watcher) return this.watcher.start(id, token);
+        client.watchStderr(id, new TextEncoder().encode("cc-remote: this session runs no Monitor commands\n"));
+        client.watchEnd(id, 1);
+      },
+      watchAcked: (id) => this.watcher?.acked(id),
+      watchClosed: (id) => this.watcher?.closed(id),
     }));
     this.stdin.open(new Writable({
       write: (chunk: Buffer, _encoding, done) => {
@@ -577,6 +616,7 @@ export class HostProcess extends EventEmitter {
     for (const wake of [...this.wakers]) wake();
     live.delete(this);
     this.client?.failExecs(new Error("the session has ended"));
+    this.watcher?.closeAll();
     const conn = this.conn;
     this.conn = undefined;
     // After an exit the channel closes by itself, once the host has the bye.

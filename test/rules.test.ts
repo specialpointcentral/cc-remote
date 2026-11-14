@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { ShellSyntaxError, simpleCommands } from "../src/lexer";
 import { globalExcludesFile, IGNORE_PATTERN, localSettingsDir, resetLocalSettings } from "../src/local-settings";
-import { broad, decide, evaluate, persistAllowRule, refusal, rulePattern, type Rules, rulesFor, rulesHook, settingsLocations, TrackedSettingsError } from "../src/rules";
+import { broad, decide, evaluate, persistAllowRule, refusal, rulePattern, type Rules, rulesFor, rulesHook, settingsLocations, settingsProblems, TrackedSettingsError } from "../src/rules";
 
 const base = mkdtempSync(join(tmpdir(), "cc-remote-rules-"));
 const config = join(base, "config");
@@ -118,6 +118,45 @@ describe("Claude rules", () => {
       "npm test *.js", "/tmp/x/npm test", "FOO=1 npm test", "sudo npm test", "npm test\nnpm test"]) {
       expect(claude(command)).toEqual(["none", ""]);
     }
+  });
+
+  test("a settings file that can't be used makes every command ask, naming it; valid deny rules still refuse", () => {
+    const broken = join(project, ".claude", "settings.local.json");
+    put(broken, '{"permissions": {"deny": ["Bash(git push *)"],}}');
+    const rules = rulesFor(project, "Bash");
+    expect(rules.invalid).toHaveLength(1);
+    expect(rules.invalid![0]).toStartWith(`${broken} is not valid JSON (`);
+    expect(settingsProblems(project)).toEqual(rules.invalid!);
+    // An allow rule, a read-only command and an unruled one alike: the broken file may deny them.
+    for (const command of ["npm test", "git status", "ls", "make"]) {
+      for (const mode of ["default", "acceptEdits", "auto", "bypassPermissions", "plan"]) {
+        const [decision, reason] = claude(command, mode);
+        expect(decision).toBe("ask");
+        expect(reason).toContain(broken);
+        expect(reason).toContain("each Bash command needs the user's approval");
+      }
+      expect(claude(command, "dontAsk")[0]).toBe("deny");
+    }
+    expect(claude("rm x")).toEqual(["deny", "the permission rule Bash(rm:*) denies this command"]);
+    // Asking isn't refusing: once approved, the command runs.
+    expect(refusal("ls", project, "Bash")).toBeUndefined();
+    // Not a JSON object, or not readable, counts too; fixing the file clears it.
+    put(broken, "[1]");
+    expect(rulesFor(project, "Bash").invalid).toEqual([`${broken} is not a JSON object`]);
+    rmSync(join(config, "settings.json"));
+    mkdirSync(join(config, "settings.json"));
+    expect(settingsProblems(project)).toEqual([`${join(config, "settings.json")} can't be read (EISDIR)`, `${broken} is not a JSON object`]);
+    rmSync(join(config, "settings.json"), { recursive: true });
+    put(broken, "{}");
+    expect(rulesFor(project, "Bash").invalid).toBeUndefined();
+    expect(claude("make")).toEqual(["none", ""]);
+  });
+
+  test("a missing or empty settings file is no problem", () => {
+    put(join(project, ".claude", "settings.local.json"), " \n");
+    rmSync(join(config, "settings.json"));
+    expect(settingsProblems(project)).toEqual([]);
+    expect(rulesFor(project, "Bash").invalid).toBeUndefined();
   });
 
   test("auto mode keeps only narrow allow rules, as Claude Code does", () => {

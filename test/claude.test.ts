@@ -7,7 +7,7 @@ import { hostLaunch } from "../src/args";
 import { forwardedEnv } from "../src/claude";
 import { initialize, sdkHost } from "../src/control";
 import { REMOVED } from "../src/names";
-import { mirrorKey, projectKey, projectsDir, writeMirror } from "../src/sessions";
+import { mirrorKey, projectsDir } from "../src/sessions";
 import { argument, hostDir } from "../src/ssh";
 import { localTools } from "../src/tools";
 import { fakeHost, TEAMS_OFF } from "./fakehost";
@@ -221,15 +221,10 @@ describe("sdkHost", () => {
     expect(set.request.servers).toEqual({ mine: { type: "sdk", name: "mine" }, cc: { type: "sdk", name: "cc", timeout: 660_000 } });
   });
 
-  test("writes transcript mirror frames to the local projects folder instead of passing them on", () => {
+  test("passes transcript mirror frames on: the proxy before it writes them (rewrite.test.ts)", () => {
     const { layer } = harness({});
-    const file = join(projectsDir(), projectKey("/work/app"), "s1.jsonl");
-    const entries = [{ type: "user", uuid: "u1" }, { type: "assistant", uuid: "a1" }];
-    expect(layer.outbound(JSON.stringify({ type: "transcript_mirror", filePath: file, entries }))).toBeNull();
-    expect(layer.outbound(JSON.stringify({ type: "transcript_mirror", filePath: file, entries: [{ type: "user", uuid: "u2" }] }))).toBeNull();
-    expect(readFileSync(file, "utf8").trim().split("\n").map((l) => JSON.parse(l).uuid)).toEqual(["u1", "a1", "u2"]);
-    writeMirror({ projectKey: "-p", sessionId: "s2", subpath: "subagents/agent-b" }, [{ type: "agent_metadata", agentType: "x" }]);
-    expect(JSON.parse(readFileSync(join(projectsDir(), "-p", "s2", "subagents", "agent-b.meta.json"), "utf8"))).toEqual({ agentType: "x" });
+    const frame = JSON.stringify({ type: "transcript_mirror", filePath: join(projectsDir(), "-w", "s1.jsonl"), entries: [] });
+    expect(layer.outbound(frame)).toBe(frame);
   });
 });
 

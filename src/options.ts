@@ -45,6 +45,7 @@ export function remote(host: string) {
       // claude asks before any MCP tool; it never asks before its own reads.
       allowedTools: [...(options.allowedTools ?? []), ...READS.map((t) => PREFIX + t)],
       hooks: widenHooks(options.hooks),
+      // The store only turns claude's mirror on: the proxy writes the frames itself, in stream order.
       ...(options.persistSession === false ? {} : { sessionStore: mirror }),
     };
   };

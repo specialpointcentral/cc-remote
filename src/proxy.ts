@@ -4,11 +4,12 @@ import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { PassThrough, type Readable } from "node:stream";
 import { loadGrants, saveGrants } from "./grants";
+import type { LocalHooks } from "./hooks";
 import { EDITS, LOCAL, PREFIX, strip } from "./names";
 import { SHELL } from "./platform";
 import { HOOK_ID, policyHook, shellVerdict, withPolicyHook, workspaceEdit } from "./policy";
 import { type Destination, persistAllowRule, type ShellTool, TrackedSettingsError, type Verdict } from "./rules";
-import { projectKey, projectsDir } from "./sessions";
+import { mirrorKey, projectKey, projectsDir, writeMirror } from "./sessions";
 import type { Workspace } from "./tools/util";
 
 /** What one claude process needs to have its messages read as if it ran in `cwd` on this machine. */
@@ -25,6 +26,8 @@ export type Session = {
   ws?: Workspace;
   /** The session's id, once known: from the command line, else from claude's init message. */
   sessionId?: string;
+  /** The hooks of this machine's settings that run here (hooks/). */
+  hooks?: LocalHooks;
 };
 
 /**
@@ -58,10 +61,12 @@ const FILES: string[] = ["localSettings", "projectSettings", "userSettings"] sat
  * Rewrites the stream between the SDK and the remote claude, both ways:
  *
  * - claude → SDK: the local tools lose their `mcp__cc__` prefix, so ACP renders them as the
- *   built-ins; the host folder becomes the local cwd; transcript mirror frames point into the
- *   local projects folder, where the SDK expects them.
+ *   built-ins; the host folder becomes the local cwd; transcript mirror frames are written to the
+ *   local projects folder, where a local claude keeps the transcript, in the order they come, so
+ *   a hook that reads the transcript finds everything claude mirrored before calling it.
  * - SDK → claude: permission rules the user approves for a local tool get the prefix back, and
- *   `initialize` gets cc-remote's own PreToolUse hook (policy.ts), whose callbacks are answered here.
+ *   `initialize` gets cc-remote's own PreToolUse hook (policy.ts) and the hooks of this machine's
+ *   settings (hooks/), whose callbacks are answered here.
  *
  * It also answers claude's permission requests that claude would answer itself for its built-ins:
  * local edits under acceptEdits, and shell commands that the user's rules or this session's grants
@@ -105,8 +110,13 @@ export function rewriter(s: Session) {
       const m = JSON.parse(text);
       if (m.type === "transcript_mirror" && typeof m.filePath === "string") {
         const rest = m.filePath.match(/\/projects\/[^/]+\/(.+)$/)?.[1];
-        if (rest) m.filePath = join(transcripts, rest);
-        return JSON.stringify(m);
+        const key = rest ? mirrorKey(join(transcripts, rest)) : undefined;
+        try {
+          if (key && Array.isArray(m.entries)) writeMirror(key, m.entries);
+        } catch (e) {
+          console.error(`cc-remote: could not write the local transcript: ${(e as Error).message}`);
+        }
+        return null;
       }
     }
     if (text.includes('"permissionMode"')) {
@@ -122,11 +132,18 @@ export function rewriter(s: Session) {
     };
     if (text.includes('"hook_callback"')) {
       const m = JSON.parse(text);
-      if (m.type === "control_request" && m.request?.subtype === "hook_callback" && m.request.callback_id === HOOK_ID) {
+      if (m.type === "control_request" && m.request?.subtype === "hook_callback" && (m.request.callback_id === HOOK_ID || s.hooks?.owns(m.request.callback_id))) {
         const input = m.request.input;
         if (typeof input?.permission_mode === "string") s.mode = input.permission_mode;
-        return answer(m.request_id, policyHook(input, s.cwd, grants, s.dirs, s.ws));
+        if (m.request.callback_id === HOOK_ID) return answer(m.request_id, policyHook(input, s.cwd, grants, s.dirs, s.ws));
+        s.hooks!.answer(m.request_id, m.request.callback_id, input, (output) => answer(m.request_id, output));
+        return null;
       }
+    }
+    if (s.hooks && text.includes('"control_cancel_request"')) {
+      // The SDK never saw the request: the cancellation is ours too.
+      const m = JSON.parse(text);
+      if (m.type === "control_cancel_request" && s.hooks.cancel(m.request_id)) return null;
     }
     if (text.includes('"can_use_tool"')) {
       const m = JSON.parse(text);
@@ -179,7 +196,9 @@ export function rewriter(s: Session) {
   function inbound(line: string): string {
     if (line.includes('"initialize"')) {
       const m = JSON.parse(line);
-      if (m.type === "control_request" && m.request?.subtype === "initialize") return JSON.stringify({ ...m, request: withPolicyHook(m.request) });
+      if (m.type === "control_request" && m.request?.subtype === "initialize") {
+        return JSON.stringify({ ...m, request: withPolicyHook(s.hooks ? s.hooks.register(m.request) : m.request) });
+      }
     }
     if (line.includes('"set_permission_mode"')) {
       const m = JSON.parse(line);

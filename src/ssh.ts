@@ -6,6 +6,7 @@ import { resolve } from "node:path";
 import { grantsSession } from "./grants";
 import { bundle, checkScript, installScript, type Need, type Ready, readyFields } from "./host-files";
 import { HostFiles } from "./host-fs";
+import { sessionHooks } from "./hooks";
 import { HostProcess, type RelayPlan } from "./host-process";
 import { WINDOWS } from "./platform";
 import { projectTrees } from "./project-claude";
@@ -205,7 +206,7 @@ export type Upload = { local: string; remote: string };
 const NO_TEAMS = { CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "0" };
 
 /** A `--settings` value as an object: inline JSON, or a local file holding it. Undefined when it is neither. */
-function settingsObject(value: string, cwd: string): Record<string, any> | undefined {
+export function settingsObject(value: string, cwd: string): Record<string, any> | undefined {
   try {
     const parsed = JSON.parse(/^\s*\{/.test(value) ? value : readFileSync(resolve(cwd, value), "utf8"));
     return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : undefined;
@@ -221,8 +222,12 @@ function settingsObject(value: string, cwd: string): Record<string, any> | undef
  * claude starts with, so the host's user settings could otherwise turn teams back on; these flag
  * settings outrank the user's. A value that is no JSON object, inline or in a local file, stays
  * where it was, before ours, which claude takes as the last word.
+ *
+ * With `hooks` (a stream session, whose hooks from this machine's settings cc-remote runs), those
+ * replace the hooks of the caller's settings, which are this machine's too: the local ones run
+ * here, and `hooks` holds what has to run on the host (hooks/config.ts).
  */
-export function teamsOff(args: string[], cwd: string): string[] {
+export function teamsOff(args: string[], cwd: string, hooks?: Record<string, unknown[]>): string[] {
   const out: string[] = [];
   let merged: Record<string, any> = {};
   for (let i = 0; i < args.length; i++) {
@@ -236,6 +241,10 @@ export function teamsOff(args: string[], cwd: string): string[] {
     const settings = settingsObject(value, cwd);
     if (settings) merged = { ...merged, ...settings, env: { ...merged.env, ...settings.env } };
     else out.push("--settings", value);
+  }
+  if (hooks) {
+    delete merged.hooks;
+    if (Object.keys(hooks).length) merged.hooks = hooks;
   }
   return [...out, "--settings", JSON.stringify({ ...merged, env: { ...merged.env, ...NO_TEAMS } })];
 }
@@ -267,9 +276,13 @@ function versionCheck(host: string): { refuse?: string; ask?: string; ready?: (r
  *
  * A stream session (stream-json input, an SDK on the other end) starts claude under the relay,
  * when the host has python3 and CC_REMOTE_RECONNECT_GRACE isn't 0: claude then survives a dropped
- * connection, and cc-remote reconnects and goes on where the stream was.
+ * connection, and cc-remote reconnects and goes on where the stream was. `hostHooks`, for a stream
+ * session, are the hooks of this machine's settings that the host claude runs (teamsOff).
  */
-export function launch(host: string, cwd: string, args: string[], env: Record<string, string>, uploads: Upload[] = [], signal?: AbortSignal, found?: (where: Ready, exec?: Exec) => void): HostProcess {
+export function launch(
+  host: string, cwd: string, args: string[], env: Record<string, string>, uploads: Upload[] = [], signal?: AbortSignal,
+  found?: (where: Ready, exec?: Exec) => void, hostHooks?: Record<string, unknown[]>,
+): HostProcess {
   const needs: Need[] = uploads.map((u) => ({ kind: "plugin", ...u }));
   const grace = reconnectGrace();
   const stream = argument(args, "--input-format") === "stream-json";
@@ -291,7 +304,7 @@ export function launch(host: string, cwd: string, args: string[], env: Record<st
   const timeout = linkTimeout();
   const start: RelayStart | undefined = relayed ? { id: nonce.replaceAll("-", "").slice(0, 20), sessionId, grace, idle: timeout + 15 } : undefined;
   const check = checkScript(needs, !project.files.length, tokens, version.ask, start?.sessionId);
-  const command = remoteCommand(teamsOff(args, cwd), { ...env, ...NO_TEAMS }, cwd, check, start);
+  const command = remoteCommand(teamsOff(args, cwd, hostHooks), { ...env, ...NO_TEAMS }, cwd, check, start);
   const ssh = (shared: boolean) => [...rsh(shared), "-T", host];
   const attach = `cc-remote-v1-attach-${nonce}`;
   const relay: RelayPlan | undefined = start && {
@@ -348,8 +361,10 @@ export function spawner(host: string, cwd: string, env: Record<string, string>, 
         (e): e is [string, string] => e[1] !== undefined && process.env[e[0]] !== e[1] && e[0] !== "CLAUDE_CONFIG_DIR",
       ),
     );
-    const child = launch(host, cwd, options.args, { ...added, ...env }, [], options.signal, tellTools(host, ws));
+    // The SDK speaks stream-json; the hooks of this machine's settings run here, or through the host's --settings.
+    const hooks = argument(options.args, "--input-format") === "stream-json" ? sessionHooks(cwd, options.args, ws) : undefined;
+    const child = launch(host, cwd, options.args, { ...added, ...env }, [], options.signal, tellTools(host, ws), hooks?.host);
     const mode = argument(options.args, "--permission-mode") ?? "default";
-    return proxy(asChild(child), { cwd, hostDir: hostDir(cwd), mode, ws, sessionId: grantsSession(options.args) });
+    return proxy(asChild(child), { cwd, hostDir: hostDir(cwd), mode, ws, sessionId: grantsSession(options.args), hooks });
   };
 }

@@ -13,6 +13,7 @@ import { main as setup } from "./setup/index";
 import { main as update } from "./update/index";
 import { refreshLatest, updateNotice } from "./update/notice";
 import { remote } from "./options";
+import { settingsProblems } from "./rules";
 import { stopRelays } from "./host-process";
 import { WINDOWS } from "./platform";
 import { hostVersion, quote, rsh } from "./ssh";
@@ -85,6 +86,10 @@ async function doctor(target: string) {
   console.log(`remote claude: ${out}`);
   const problem = tooOld(target, out);
   if (problem) fail(problem);
+  // Local, and per project: the rules the local shell tool goes by, read from here.
+  for (const p of settingsProblems(process.cwd())) {
+    console.log(`warning: ${p}. Until it's fixed, every local shell command here asks for approval first (dontAsk mode refuses them).`);
+  }
   console.log("ok");
   await latest;
   const notice = updateNotice(pkg.version);

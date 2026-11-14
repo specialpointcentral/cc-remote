@@ -1,9 +1,13 @@
+import { quote } from "../sh";
 import { loginLaunch, loginShell } from "./login";
 import { MAX_OUTPUT, shellTool } from "./shell";
 
-/** The trap records where the command left us; `exec 2>&1` interleaves stderr like a terminal would. */
-const script = (command: string) =>
-  `exec 2>&1\ntrap '[ -n "$__CC_REMOTE_PWD" ] && pwd -P >| "$__CC_REMOTE_PWD"' EXIT\n${command}`;
+/**
+ * The trap records where the command left us; `exec 2>&1` interleaves stderr like a terminal would.
+ * What the session's hooks put in CLAUDE_ENV_FILE runs first.
+ */
+const script = (command: string, envFile?: string) =>
+  `exec 2>&1\ntrap '[ -n "$__CC_REMOTE_PWD" ] && pwd -P >| "$__CC_REMOTE_PWD"' EXIT\n${envFile ? `. ${quote(envFile)}\n` : ""}${command}`;
 
 /** bash or zsh, whichever is the user's login shell; bash for any other. */
 const kind = loginShell().kind ?? "bash";
@@ -21,6 +25,6 @@ export const bash = shellTool({
 - Set run_in_background for long-running processes such as dev servers. You get back an ID and an output file to Read; the process stops when the session ends
 - Prefer Read, Edit, Write, Glob and Grep over cat, sed, echo >, find and grep for file work
 - Chain dependent commands with &&; make independent calls in parallel in one response`,
-  launch: (command, ws) => loginLaunch(script(command), ws.root),
+  launch: (command, ws) => loginLaunch(script(command, ws.envFile), ws.root),
   stopHint: (pid) => `kill -- -${pid}`,
 });

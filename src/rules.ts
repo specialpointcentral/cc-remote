@@ -40,19 +40,28 @@ export const settingsLocations = {
 
 const userSettings = () => join(Bun.env.CLAUDE_CONFIG_DIR || join(home, ".claude"), "settings.json");
 
+/** The settings files of each source Claude Code reads on this machine for a session root. */
+export type SettingsSources = { managed: string[]; user: string; project: string; local: string[] };
+
 /**
- * Claude Code's managed settings files (the file, then its drop-ins in name order), then the user
- * and project ones and the local ones (the starting directory's and the repository root's, see
+ * Claude Code's managed settings files (the file, then its drop-ins in name order), the user and
+ * project ones, and the local ones (the starting directory's and the repository root's, see
  * local-settings.ts). MDM and server-managed settings are not files here, and not read.
  */
-export function settingsPaths(root: string): { managed: string[]; others: string[] } {
+export function settingsSources(root: string): SettingsSources {
   const dir = settingsLocations.managed;
   const managed = [join(dir, "managed-settings.json")];
   try {
     const dropIns = join(dir, "managed-settings.d");
     managed.push(...readdirSync(dropIns).filter((n) => n.endsWith(".json") && !n.startsWith(".")).sort().map((n) => join(dropIns, n)));
   } catch {}
-  return { managed, others: [userSettings(), join(root, ".claude", "settings.json"), ...localSettingsFiles(root)] };
+  return { managed, user: userSettings(), project: join(root, ".claude", "settings.json"), local: localSettingsFiles(root) };
+}
+
+/** The managed files, then the user, project and local ones. */
+export function settingsPaths(root: string): { managed: string[]; others: string[] } {
+  const { managed, user, project, local } = settingsSources(root);
+  return { managed, others: [user, project, ...local] };
 }
 
 /** Whether a settings entry is a rule for this tool. Deny and ask rules may also name it with a glob (`*`). */
@@ -61,10 +70,10 @@ function forTool(entry: string, tool: ShellTool, behavior: keyof Rules): boolean
   return behavior !== "allow" && !entry.includes("(") && entry.includes("*") && wildcard(entry, "").test(tool);
 }
 
-type Settings = { permissions?: Record<string, unknown>; allowManagedPermissionRulesOnly?: unknown };
+type Settings = { permissions?: Record<string, unknown>; allowManagedPermissionRulesOnly?: unknown; [key: string]: unknown };
 
 /** A settings file's content; nothing for a missing or empty one; why it can't be used otherwise. */
-function readSettings(path: string): { settings?: Settings; problem?: string } {
+export function readSettings(path: string): { settings?: Settings; problem?: string } {
   let text: string;
   try {
     text = readFileSync(path, "utf8");
@@ -118,7 +127,7 @@ export function loadRules(managed: string[], others: string[], tool: ShellTool):
 const cache = new Map<string, { identity: string; rules: Rules }>();
 
 /** The files' identities: a changed, added or removed file changes it, and stat needs no read. */
-function identity(paths: string[]): string {
+export function identity(paths: string[]): string {
   return JSON.stringify(paths.map((path) => {
     try {
       const s = statSync(path, { bigint: true });
@@ -305,6 +314,15 @@ export function evaluate(command: string, mode: string | undefined, rules: Rules
     return { decision: "allow", reason: "a read-only command, which Claude Code runs without asking" };
   }
   return { decision: "none" };
+}
+
+/**
+ * Whether one rule, such as a hook's `if: "Bash(git *)"`, matches a command the way a deny rule
+ * would: any simple command in it, wrappers skipped. Undefined when the command can't be split.
+ */
+export function ruleMatches(rule: string, command: string, tool: ShellTool): boolean | undefined {
+  const commands = commandsIn(command, tool);
+  return commands ? matchingRule([rule], commands, tool, true) !== undefined : undefined;
 }
 
 /** An ask, or in dontAsk mode, where nobody is asked, a refusal, as Claude Code refuses there. */

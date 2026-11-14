@@ -42,7 +42,8 @@ cc-remote 让 Claude Code 跑在一台你能 ssh 上去的服务器上，而它�
 |---|---|
 | Read、Write、Edit、NotebookEdit、Bash（Windows 上为 PowerShell）、Glob、Grep | 模型、系统提示词、会话 |
 | ACP 客户端带来的 MCP 服务器，以及本地 Claude Code 配置里的 MCP 服务器 | 网页搜索、子代理、skills |
-| 你的 `CLAUDE.md` 文件、git 状态、环境信息 | 服务器自己的设置和 MCP 服务器 |
+| 你的 `CLAUDE.md` 文件、git 状态、环境信息 | 服务器自己的设置、钩子和 MCP 服务器 |
+| 本机 Claude Code 设置里的 command 和 http 钩子 | 你设置里的 prompt 和 MCP 工具钩子、插件的钩子 |
 
 ## 前置条件
 
@@ -245,7 +246,9 @@ Orca 只提供"本次会话允许"，没有"总是允许"；需要长期生效�
 - Orca 一次性的 `claude -p` 调用（例如给对话起名）在服务器上运行，不带任何工具。
 - Orca 终端面板里的 Claude 也用这个命令，cc-remote 会拒绝它：交互式的 `claude` 会在服务器的
   文件夹里工作，而不是你的项目。请用 Orca 的对话，或在终端里用 acpc。
-- Orca 的 agent 状态钩子装在项目机器的 Claude 设置里，服务器上的 `claude` 不会读取它们。
+
+项目机器 Claude 设置里的钩子在项目机器上运行，和本地 Claude 一样；Orca 把 agent 状态钩子装在那里时，
+它们也一样（见[行为](#行为)里的"钩子"）。
 
 ### 命令
 
@@ -301,6 +304,26 @@ Glob 会通过同一条 ssh 连接在服务器上读写这些文件，所以 pla
 工具（conda、nvm、`module` 等）也找得到。用 bash 或 zsh 时，cc-remote 只抓取一次这个环境并在会话之间共享，
 十分钟后或启动文件变化时重新抓取；设 `CC_REMOTE_SHELL_SNAPSHOT=off` 则每条命令都以登录 shell 运行。
 命令超时或被停止时先收到 SIGTERM，五秒后再收到 SIGKILL。
+
+**钩子。** 本机 Claude Code 设置里的钩子在本机运行，和本地 Claude Code 的运行方式一样：来自 managed
+settings（含 `managed-settings.d`）、`~/.claude/settings.json`、项目的 `.claude/settings.json` 和
+`.claude/settings.local.json`，以及应用传入的 `--settings`，只取 `--setting-sources` 列出的来源。
+`disableAllHooks`（也包括 `--settings` 里的，比如 Orca 起对话标题时传的）以及 managed 的
+`allowManagedHooksOnly` 和 `strictPluginOnlyCustomization` 与 Claude Code 中的作用相同（这时 `--settings`
+里的钩子不算 managed）。cc-remote 把每个 command 和 http 钩子作为单独的
+钩子交给 claude，所以 claude 会把它们和其他钩子并行运行并合并结果。为 `Bash` 或 `Edit|Write` 写的
+matcher 也能匹配本地工具，`Bash(git *)`、`Edit(*.ts)` 这样的 `if` 条件在本机判断。command 钩子从 stdin
+读取输入，在 shell 当前所在的目录里、以和 Bash 相同的登录 shell 环境运行，`CLAUDE_PROJECT_DIR` 指向
+项目目录；到了 `timeout`（Claude Code 的默认值：600 秒，UserPromptSubmit 上 30 秒）先收到 SIGTERM，
+再收到 SIGKILL。输入里的 `cwd` 和 `transcript_path` 都是本机路径：会话记录就是本地镜像，在 claude
+调用钩子的那一刻之前的内容都已写入。退出码、JSON 输出、作为上下文的纯文本输出以及 `onFailure` 都遵循
+Claude Code 的钩子文档，所以 PreToolUse 钩子可以拒绝、询问或改写一次调用，Stop 钩子可以让 Claude
+继续工作，UserPromptSubmit 或 SessionStart 钩子可以补充上下文。SessionStart 钩子写进 `CLAUDE_ENV_FILE`
+的内容会在每条本地 Bash 命令之前执行。async 钩子在后台运行，它留给 Claude 的内容会随你的下一条提示
+送达。钩子的 `allow` 不能让命令越过你的 deny 规则：cc-remote 自己的检查仍然会拒绝，Bash 执行前也会
+再拒绝一次。prompt 和 MCP 工具钩子需要模型或 claude 自己的 MCP 连接，所以它们放进服务器上 claude 启动时
+的设置里交给它运行，matcher 也同样放宽。服务器自己的钩子和插件的钩子照旧在服务器上运行。从设置里删掉
+或用 `disableAllHooks` 关掉的钩子立即停止；新加的钩子从下一个会话开始生效。
 
 **搜索。** 装了 ripgrep 时，Glob 和 Grep 一样会遵守你的忽略文件。Grep 默认最多返回 250 条结果
 （`head_limit: 0` 返回全部），够数就停止搜索。
@@ -368,15 +391,26 @@ PowerShell 7（`pwsh`）时用它，否则用 Windows PowerShell 5.1。Grep 需�
 ### 限制
 
 - 项目的 `.claude/` 目录里，只有 `commands/`、`skills/` 和 `agents/` 会发送到服务器（有变化时复制到
-  对应的工作目录；最多 1000 个文件，单个 1 MiB，总共 8 MiB）。settings 和 hooks 留在本机。
-  服务器上用户级的设置、skills 和 MCP 服务器仍然生效。
+  对应的工作目录；最多 1000 个文件，单个 1 MiB，总共 8 MiB）。settings 留在本机，cc-remote 在本机
+  应用其中的 shell 规则、运行其中的钩子。服务器上用户级的设置、钩子、skills 和 MCP 服务器仍然生效。
+- CwdChanged、FileChanged、ConfigChange、InstructionsLoaded、DirectoryAdded、WorktreeCreate 和
+  WorktreeRemove 上的钩子不会运行：服务器上的 claude 从不切换目录，监视和加载的是它自己的文件，worktree
+  也已关闭。agent 钩子也不运行，因为它的子代理会在服务器的文件上工作。cc-remote 每个会话会在 stderr 上
+  说明一次哪些钩子没有运行。新会话的 SessionStart 钩子在发出第一条提示时运行，因为 claude 在知道
+  cc-remote 的钩子之前就已运行了自己的；它们输出的内容随这条提示送达 Claude，而它们的
+  `initialUserMessage`、`sessionTitle` 和 `watchPaths` 不起作用。claude 自己回调它们时，就在那时运行。
+  PostToolUse 钩子输入里的 `tool_response` 是本地工具的文本结果，而不是内置
+  工具的结构化结果。指向本地工具（`Bash(...)`、`Edit(...)`）的 `if` 条件写在 prompt 钩子上永远不会匹配，
+  因为 prompt 钩子在服务器上运行。`asyncRewake` 钩子无法唤醒空闲的 Claude：它留下的内容要等你的下一条
+  提示。`statusMessage` 不会显示。Windows 上 command 钩子在 Git Bash 里运行（没有 Git Bash 时用
+  PowerShell），且不支持 `CLAUDE_ENV_FILE`。
 - 文件检查点和回退记录在服务器上，因此看不到你本地的修改。
 - 从客户端桥接的 MCP 服务器只暴露工具，不暴露 resources 和 prompts。
 - LSP、Monitor 和 worktree 相关工具已关闭。
 - 重连需要服务器上有 `python3` 3.6 或更高版本。链路断开期间 claude 写到 stderr 的内容会被保留（最多
   1 MiB），但断开那一刻正在传输的部分可能丢失；会话的数据流本身不会丢。如果服务器的 systemd-logind 会在
   ssh 会话结束时杀掉该用户的进程（`KillUserProcesses=yes`），claude 就无法在连接断开后继续运行。
-- 一次性的 `claude -p`（例如 Orca 给聊天起标题）和 `cc-remote --cli` 不会重连。
+- 一次性的 `claude -p`（例如 Orca 给聊天起标题）和 `cc-remote --cli` 不会重连，也不会运行你本机的钩子。
 - claude 留在服务器上的自用文件只有 Read、Write、Edit 和 Glob 能访问，Bash 和 Grep 看不到。服务器上的
   skills 和插件不走这条路：skill 指向它旁边的文件时，读到的是你本机的同名文件（如果有）。不支持服务器
   设置里的 `plansDirectory`。
@@ -388,7 +422,8 @@ cc-remote 通过 `ssh -T` 启动 `claude`，于是同一条数据流就跨过了
 
 服务器上内置的文件和 shell 工具被关闭，cc-remote 换上名字和参数都相同的本地版本，
 `claude` 通过 SDK 的工具通道调用它们，就像调用任何进程内 MCP 工具一样。客户端的 MCP 服务器也走同一通道。
-数据流上的一个代理会把工具名改回内置名，这样客户端能照常渲染 diff 和终端；它还会把服务器上的路径映射回本地路径。
+数据流上的一个代理会把工具名改回内置名，这样客户端能照常渲染 diff 和终端；它还会把服务器上的路径映射回本地路径，
+写下会话记录镜像，并把你本机设置里的钩子作为回调钩子加进 SDK 的 `initialize` 请求，由它自己在你本机运行并应答。
 
 claude-agent-acp 只打了一处补丁（`patches/`）：一个改写每个会话 `query()` 选项的钩子。
 

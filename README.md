@@ -50,7 +50,8 @@ It can also stand in for the `claude` executable of apps that embed the Claude A
 |---|---|
 | Read, Write, Edit, NotebookEdit, Bash (PowerShell on Windows), Glob, Grep | The model, the system prompt, the session |
 | The MCP servers your ACP client brings, and those in your local Claude Code config | Web search, subagents, skills |
-| Your `CLAUDE.md` files, git status, environment | The server's own settings and MCP servers |
+| Your `CLAUDE.md` files, git status, environment | The server's own settings, hooks and MCP servers |
+| The command and http hooks in your local Claude Code settings | Prompt and MCP tool hooks from your settings, plugins' hooks |
 
 ## Requirements
 
@@ -278,8 +279,10 @@ Limits with Orca, on top of the [general ones](#limits):
 - Claude in Orca's terminal panes uses the same command, and cc-remote refuses it: an interactive
   `claude` would work on the server's folder, not your project. Use Orca's chats, or acpc in the
   terminal.
-- Orca's agent status hooks are installed in the project machine's Claude settings, which the
-  server's `claude` doesn't read.
+
+The hooks in the project machine's Claude settings run on the project machine, as they would for a
+local Claude, and so do Orca's agent status hooks where Orca has installed them there (see "Hooks"
+under [Behavior](#behavior)).
 
 ### Commands
 
@@ -348,6 +351,31 @@ Code, writing the plan and memory files doesn't ask.
 cc-remote captures that environment once and shares it between sessions, refreshing it after ten
 minutes or when a startup file changes; `CC_REMOTE_SHELL_SNAPSHOT=off` runs every command as a login
 shell instead. A command that times out or is stopped gets SIGTERM, and SIGKILL five seconds later.
+
+**Hooks.** The hooks in your machine's Claude Code settings run on your machine, as a local Claude
+Code would run them: those in the managed settings (and `managed-settings.d`), in
+`~/.claude/settings.json`, in the project's `.claude/settings.json` and `.claude/settings.local.json`,
+and in a `--settings` the app passes, from the sources its `--setting-sources` names.
+`disableAllHooks` (also in `--settings`, as in Orca's chat titles) and the managed
+`allowManagedHooksOnly` and `strictPluginOnlyCustomization` work as in Claude Code (the hooks of a
+`--settings` count as not managed there). cc-remote gives claude each command and http hook as a
+hook of its own, so claude runs them in parallel with its other hooks and merges their answers. A
+matcher written for `Bash` or `Edit|Write` also matches the local tools, and an `if` condition such
+as `Bash(git *)` or `Edit(*.ts)` is checked locally. A command hook
+gets its input on stdin and runs in the shell's current directory, with `CLAUDE_PROJECT_DIR` set to
+the project, in your login shell's environment as Bash is, until its `timeout` (Claude Code's
+defaults: 600 seconds, 30 on UserPromptSubmit), when it gets SIGTERM and then SIGKILL. `cwd` and
+`transcript_path` in its input are your machine's: the transcript is the local mirror, written up to
+the moment claude calls the hook. Exit codes, JSON output, plain text as context and `onFailure`
+follow Claude Code's hooks reference, so a PreToolUse hook can deny, ask about or rewrite a call, a
+Stop hook can keep Claude going, and a UserPromptSubmit or SessionStart hook can add context. What a
+SessionStart hook writes to `CLAUDE_ENV_FILE` runs before each local Bash command. An async hook runs
+in the background, and what it leaves for Claude comes with your next prompt. A hook's `allow` doesn't
+get a command past your deny rules: cc-remote's own check still denies it, and Bash refuses it again
+before running it. Prompt and MCP tool hooks need the model or claude's MCP connections, so they go to
+the server's claude in the settings it starts with, their matchers widened the same way. The server's
+own hooks, and plugins' hooks, run on the server as before. A hook taken out of the settings, or
+turned off with `disableAllHooks`, stops at once; a new one starts with the next session.
 
 **Search.** With ripgrep installed, Glob honours your ignore files, as Grep does. Grep returns up to
 250 results by default (`head_limit: 0` for all of them) and stops searching once it has enough.
@@ -431,8 +459,20 @@ like `C:\Users\me\app` gets the working folder `~/.cc-remote/ws/<your hostname>/
 
 - Of your project's `.claude/` directory, only `commands/`, `skills/` and `agents/` go to the server
   (copied into its working folder when they change; up to 1000 files, 1 MiB each, 8 MiB in all).
-  Settings and hooks stay on your machine. The server's user-level settings, skills and MCP servers
-  still apply.
+  Settings stay on your machine, where cc-remote applies their shell rules and runs their hooks. The
+  server's user-level settings, hooks, skills and MCP servers still apply.
+- Hooks on CwdChanged, FileChanged, ConfigChange, InstructionsLoaded, DirectoryAdded, WorktreeCreate
+  and WorktreeRemove don't run: claude on the server never changes directory, watches and loads its
+  own files, and worktrees are off. Nor do agent hooks, whose subagent would work on the server's
+  files. cc-remote names what it leaves out on stderr, once per session. A new session's
+  SessionStart hooks run as the first prompt is sent, since claude starts its own before it learns
+  of cc-remote's: what they print reaches Claude with that prompt, and their `initialUserMessage`,
+  `sessionTitle` and `watchPaths` aren't used (when claude does call them back, they run then). In a
+  PostToolUse hook's input, `tool_response` is the local tool's text result rather than the built-in
+  tool's structured one. An `if` condition naming a local tool (`Bash(...)`, `Edit(...)`) never
+  matches on a prompt hook, which runs on the server. An `asyncRewake` hook can't wake an idle
+  Claude: what it leaves waits for your next prompt. `statusMessage` isn't shown. On Windows, command
+  hooks run in Git Bash, or in PowerShell without it, and `CLAUDE_ENV_FILE` isn't supported.
 - File checkpoints and rewind are recorded on the server, so they can't see your local edits.
 - Bridged MCP servers from your client expose their tools only, not resources or prompts.
 - LSP, Monitor and the worktree tools are turned off.
@@ -440,7 +480,8 @@ like `C:\Users\me\app` gets the working folder `~/.cc-remote/ws/<your hostname>/
   link is down is kept (up to 1 MiB) but can be lost if it was in flight when the link dropped; the
   session's stream never is. On a server whose systemd-logind kills a user's processes when their ssh
   session ends (`KillUserProcesses=yes`), claude can't outlive the connection.
-- One-off `claude -p` runs (such as Orca's chat titles) and `cc-remote --cli` don't reconnect.
+- One-off `claude -p` runs (such as Orca's chat titles) and `cc-remote --cli` don't reconnect, and run
+  no hooks from your machine.
 - Files claude keeps on the server for itself are reached by Read, Write, Edit and Glob only; Bash
   and Grep can't see them. The server's skills and plugins aren't reached this way: a skill that
   points at a file beside it finds your machine's copy, if any. A `plansDirectory` set in the
@@ -456,7 +497,9 @@ The built-in file and shell tools are turned off on the server. cc-remote replac
 local versions that have the same names and inputs, and `claude` calls them through the SDK's tool
 channel, the same way it calls any in-process MCP tool. Your client's MCP servers use that same
 channel. A proxy on the stream renames the tools back to their built-in names, so your client
-renders diffs and terminals as usual. It also maps the server's paths to your local ones.
+renders diffs and terminals as usual. It also maps the server's paths to your local ones, writes the
+transcript mirror, and adds the hooks of your local settings to the SDK's `initialize` request as
+callback hooks, which it answers itself by running them on your machine.
 
 claude-agent-acp is patched in one place (`patches/`): a hook that rewrites the `query()` options
 for each session.

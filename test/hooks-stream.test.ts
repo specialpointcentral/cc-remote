@@ -113,7 +113,7 @@ describe("hooks of this machine's settings on the stream", () => {
       { matcher: "Edit", hookCallbackIds: ["hook_0"] },
       { matcher: "Bash|mcp__cc__Bash", hookCallbackIds: ["cc-remote-hook-0"], timeout: 630 },
       { matcher: "Bash|mcp__cc__Bash", hookCallbackIds: ["cc-remote-hook-1"], timeout: 35 },
-      { matcher: "mcp__cc__Bash|mcp__cc__Write|mcp__cc__Edit|mcp__cc__NotebookEdit|Agent|Task", hookCallbackIds: [HOOK_ID] },
+      { matcher: "mcp__cc__Bash|mcp__cc__Write|mcp__cc__Edit|mcp__cc__NotebookEdit|Agent|Task|Monitor", hookCallbackIds: [HOOK_ID] },
     ]);
     // The carrier brings what SessionStart hooks print, when claude doesn't call them back itself.
     expect(request.hooks.UserPromptSubmit).toEqual([{ hookCallbackIds: ["cc-remote-hook-2"], timeout: 60 }, { hookCallbackIds: ["cc-remote-hooks-carrier"], timeout: 630 }]);

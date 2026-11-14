@@ -22,17 +22,21 @@ import type { Workspace } from "./tools/util";
  * approves local edits in the working directories under acceptEdits and auto mode, as claude
  * approves its own there: in auto mode they would otherwise all go to the classifier. Edits of the
  * host claude's own plan and memory files (host-fs.ts) it approves in every mode, as claude
- * approves its own.
+ * approves its own. claude's Monitor it points at this machine (monitor.ts): the command gets the
+ * shell rules' decision, and runs as a monitor process of the relay's, which has it run here.
  */
 export const HOOK_ID = "cc-remote-policy";
 
 /** The subagent tool, under its current name and its earlier one. */
 const AGENTS = ["Agent", "Task"];
 
+/** claude's own Monitor, whose commands run here. */
+export const MONITOR = "Monitor";
+
 type Json = Record<string, any>;
 
 /** claude matches hooks against the names it knows: the local tools keep their prefix there. */
-const MATCHER = [PREFIX + SHELL, ...EDITS.map((t) => PREFIX + t), ...AGENTS].join("|");
+const MATCHER = [PREFIX + SHELL, ...EDITS.map((t) => PREFIX + t), ...AGENTS, MONITOR].join("|");
 
 /** Claude Code's protected paths: writes there are never approved by a mode alone. */
 const PROTECTED_DIRS = new Set([".git", ".vscode", ".idea", ".husky", ".cargo", ".devcontainer", ".yarn", ".mvn", ".claude"]);
@@ -110,6 +114,7 @@ export function policyHook(input: Json | undefined, root: string, grants: Iterab
       ? deny('subagents can\'t use isolation: "worktree" here, because claude runs on another host and the worktree would be made there, not in the local project. Run the subagent without isolation.')
       : {};
   }
+  if (tool === MONITOR) return monitorHook(input, root, grants, dirs, ws);
   if (tool !== SHELL) return {};
   try {
     const place = { root, cwd: ws?.cwd, dirs };
@@ -117,6 +122,33 @@ export function policyHook(input: Json | undefined, root: string, grants: Iterab
   } catch (e) {
     return deny(`could not check this command against your permission rules (${(e as Error).message})`);
   }
+}
+
+/**
+ * A Monitor call: a command gets what the shell rules say of it, as a Bash command would, and both
+ * it and a WebSocket watch run here (monitor.ts) unless denied. Without the relay, nothing can.
+ */
+function monitorHook(input: Json, root: string, grants: Iterable<string>, dirs: string[], ws?: Workspace): HookJSONOutput {
+  const monitors = ws?.monitors;
+  if (!monitors) {
+    return deny("Monitor can't run in this session: its commands run on the user's machine through cc-remote's relay, which needs python3 3.6 or later on the server. Run the command with Bash and run_in_background, and Read its output file instead.");
+  }
+  const call = input.tool_input ?? {};
+  const rewrite = (decided: Json | undefined, ask = false): HookJSONOutput =>
+    ({ hookSpecificOutput: { hookEventName: "PreToolUse", ...decided, updatedInput: monitors.approve(call, ask) } });
+  if (call.ws && typeof call.ws === "object") return rewrite(undefined);
+  // claude refuses the call itself.
+  if (typeof call.command !== "string") return {};
+  let out: HookJSONOutput;
+  try {
+    const place = { root, cwd: ws?.cwd, dirs };
+    out = shellHookOutput(call.command, input.permission_mode, withGrants(rulesFor(root, SHELL as ShellTool), grants), SHELL as ShellTool, place);
+  } catch (e) {
+    return deny(`could not check this command against your permission rules (${(e as Error).message})`);
+  }
+  const decided = (out as { hookSpecificOutput?: Json }).hookSpecificOutput;
+  if (decided?.permissionDecision === "deny") return out;
+  return rewrite(decided, decided?.permissionDecision === "ask");
 }
 
 /** What the rules and the session's grants say about a shell command claude asks to run, with the shell now in `cwd`. */

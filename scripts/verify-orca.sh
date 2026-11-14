@@ -9,7 +9,7 @@
 # free port, with Orca's Claude Command pointing at this checkout's cc-remote. The central server is
 # test/e2e/fakessh with FAKE_HOST_ISOLATED=1 (the host side on this machine, in a mount namespace of
 # its own, with this machine's Claude login), or a real one with --host. The chats are real claude
-# turns: four small ones on the cheapest model (CC_REMOTE_LIVE_MODEL, default haiku; three without a
+# turns: five small ones on the cheapest model (CC_REMOTE_LIVE_MODEL, default haiku; four without a
 # previous build), plus the title Orca has Claude write for the chat. Needs
 # 1000 MB of available memory; every process of the run is stopped at the end, also after a failure.
 # CC_REMOTE_LIVE_KEEP=1 keeps the run's folder (logs, launches, chat pages) even when it passes.

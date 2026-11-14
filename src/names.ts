@@ -1,4 +1,5 @@
-import { SHELL } from "./platform";
+import { BUILTIN_TOOL_NAMES } from "@anthropic-ai/claude-agent-sdk";
+import { SHELL, WINDOWS } from "./platform";
 
 /** The file tools, under the names Claude Code uses for its own versions. */
 const FILES = ["Read", "Write", "Edit", "Glob", "Grep", "NotebookEdit"];
@@ -17,10 +18,41 @@ export const EDITS = ["Write", "Edit", "NotebookEdit"];
 
 /**
  * Built-in tools that would act on the host instead of this machine. LSP needs local language
- * servers, Monitor streams events claude can't receive from an MCP tool, the worktree tools move
- * claude's own working directory, and both shells would run on the host.
+ * servers, the worktree tools move claude's own working directory, and both shells would run on
+ * the host. Monitor would too, unless the session's relay brings its commands here (monitor.ts):
+ * see hostTools.
  */
 export const REMOVED = [...FILES, ...SHELLS, "LSP", "Monitor", "EnterWorktree", "ExitWorktree"];
+
+/**
+ * Whether a session keeps claude's Monitor, whose commands run here: a stream session (whose
+ * PreToolUse hook rewrites them) under the relay, and not on Windows, where the local shell is
+ * PowerShell and Monitor's commands are written for a POSIX one.
+ */
+export const keepsMonitor = (relayed: boolean) => relayed && !WINDOWS;
+
+/** claude's built-in tools that Agent SDK 0.3.312's list lacks, as claude 2.1.325 offers them by default. */
+const NEWER = ["DesignSync", "SendToProject", "SendToProjectContext"];
+
+/** Built-ins claude offers only in an interactive session: naming them in `--tools` would turn them on. */
+const INTERACTIVE = ["TaskCreate", "TaskGet", "TaskList", "TaskUpdate"];
+
+/**
+ * How a session leaves out the built-ins that would act on the host: `disallowed` for
+ * --disallowedTools, and, when it keeps Monitor, `tools` for --tools. A deny rule for Bash, which
+ * hides the host's shell, makes claude drop Monitor as well, since Monitor goes by Bash's rules.
+ * So a session that keeps Monitor names its tools instead: the caller's list, or claude's
+ * built-ins as the Agent SDK knows them (and a few newer ones), without the removed ones; the
+ * others are still denied, all but Bash. A built-in the list lacks, from a newer claude, isn't offered until
+ * cc-remote knows of it; a name this claude doesn't have is ignored.
+ */
+export function hostTools(relayed: boolean, caller?: string[]): { tools?: string[]; disallowed: string[] } {
+  if (!keepsMonitor(relayed)) return { tools: caller, disallowed: REMOVED };
+  const names = caller?.flatMap((v) => v.split(/[\s,]+/)).filter(Boolean);
+  const base = !names || names.includes("default") ? [...BUILTIN_TOOL_NAMES, ...NEWER].filter((t) => !INTERACTIVE.includes(t)) : names;
+  const tools = [...new Set(base)].filter((t) => t === "Monitor" || !REMOVED.includes(t));
+  return { tools, disallowed: REMOVED.filter((t) => t !== "Bash" && t !== "Monitor") };
+}
 
 /** claude puts every MCP tool behind `mcp__<server>__`. It only exists between claude and the SDK. */
 export const PREFIX = "mcp__cc__";

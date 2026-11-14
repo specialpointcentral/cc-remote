@@ -48,7 +48,7 @@ It can also stand in for the `claude` executable of apps that embed the Claude A
 
 | Runs on your machine | Runs on the server |
 |---|---|
-| Read, Write, Edit, NotebookEdit, Bash (PowerShell on Windows), Glob, Grep | The model, the system prompt, the session |
+| Read, Write, Edit, NotebookEdit, Bash (PowerShell on Windows), Glob, Grep, and what Monitor watches | The model, the system prompt, the session |
 | The MCP servers your ACP client brings, and those in your local Claude Code config | Web search, subagents, skills |
 | Your `CLAUDE.md` files, git status, environment | The server's own settings, hooks and MCP servers |
 | The command and http hooks in your local Claude Code settings | Prompt and MCP tool hooks from your settings, plugins' hooks |
@@ -352,6 +352,29 @@ cc-remote captures that environment once and shares it between sessions, refresh
 minutes or when a startup file changes; `CC_REMOTE_SHELL_SNAPSHOT=off` runs every command as a login
 shell instead. A command that times out or is stopped gets SIGTERM, and SIGKILL five seconds later.
 
+**Monitor.** Claude's Monitor tool watches your machine. The command a watch starts runs here, the
+way a Bash command does: in your login shell's environment, in the directory the shell is in. Each
+line it prints reaches Claude as an event, as with Claude Code's own Monitor, and its exit ends the
+watch. A WebSocket watch (`ws`) is opened here too. claude on the server still runs the tool, with
+its timeout and its stop button: before it runs, cc-remote rewrites the call into a command of its
+relay, `"$CC_REMOTE_PYTHON" -S "$CC_REMOTE_RELAY" monitor <token> '<the command>'`, which has your
+machine run the command and passes its output back. That form is what auto mode's classifier and
+claude's task list see. The command gets the same permission treatment as a Bash command: your deny
+rules refuse it, also when it starts; ask rules ask; allow rules and read-only commands go ahead
+without asking. A prompt shows the command Claude asked for, and its "don't ask again" adds that
+command's prefix to your Bash rules. While the link is down, the output waits on your machine and
+reaches Claude once it is back. A command that prints faster than the server takes its output is
+paused until the server catches up. When the watch ends (its timeout, Claude or you stopping it, the
+session ending), the command's whole process group is stopped. Monitor needs the relay described
+under Dropped connections below. Claude Code tells Claude when a background Bash command ends, but
+cc-remote's Bash can't, so its description points Claude at Monitor for that.
+
+To keep Monitor, such a session starts the server's claude with the list of its tools
+(`--tools`) rather than a deny rule for Bash: claude drops Monitor along with a denied Bash, since
+Monitor goes by Bash's rules. The list is claude's built-in tools as cc-remote knows them, without
+those that would act on the server; a built-in tool that a newer claude adds is left out until
+cc-remote knows of it. Sessions without Monitor deny those tools as before.
+
 **Hooks.** The hooks in your machine's Claude Code settings run on your machine, as a local Claude
 Code would run them: those in the managed settings (and `managed-settings.d`), in
 `~/.claude/settings.json`, in the project's `.claude/settings.json` and `.claude/settings.local.json`,
@@ -475,7 +498,11 @@ like `C:\Users\me\app` gets the working folder `~/.cc-remote/ws/<your hostname>/
   hooks run in Git Bash, or in PowerShell without it, and `CLAUDE_ENV_FILE` isn't supported.
 - File checkpoints and rewind are recorded on the server, so they can't see your local edits.
 - Bridged MCP servers from your client expose their tools only, not resources or prompts.
-- LSP, Monitor and the worktree tools are turned off.
+- LSP and the worktree tools are turned off. So is Monitor on Windows, in one-off `claude -p` runs and
+  with reconnection off (`CC_REMOTE_RECONNECT_GRACE=0`). On a server without python3 3.6 or later it
+  refuses, saying to use Bash in the background instead. A WebSocket watch's text frame with several
+  lines reaches Claude as one line, its line breaks written `\n`. Where Monitor is on, a built-in tool
+  newer than cc-remote isn't offered (see [Monitor](#behavior)).
 - Reconnection needs `python3` 3.6 or later on the server. What claude writes to stderr while the
   link is down is kept (up to 1 MiB) but can be lost if it was in flight when the link dropped; the
   session's stream never is. On a server whose systemd-logind kills a user's processes when their ssh

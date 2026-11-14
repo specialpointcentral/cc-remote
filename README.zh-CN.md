@@ -40,7 +40,7 @@ cc-remote 让 Claude Code 跑在一台你能 ssh 上去的服务器上，而它�
 
 | 在本机运行 | 在服务器运行 |
 |---|---|
-| Read、Write、Edit、NotebookEdit、Bash（Windows 上为 PowerShell）、Glob、Grep | 模型、系统提示词、会话 |
+| Read、Write、Edit、NotebookEdit、Bash（Windows 上为 PowerShell）、Glob、Grep，以及 Monitor 监视的对象 | 模型、系统提示词、会话 |
 | ACP 客户端带来的 MCP 服务器，以及本地 Claude Code 配置里的 MCP 服务器 | 网页搜索、子代理、skills |
 | 你的 `CLAUDE.md` 文件、git 状态、环境信息 | 服务器自己的设置、钩子和 MCP 服务器 |
 | 本机 Claude Code 设置里的 command 和 http 钩子 | 你设置里的 prompt 和 MCP 工具钩子、插件的钩子 |
@@ -305,6 +305,24 @@ Glob 会通过同一条 ssh 连接在服务器上读写这些文件，所以 pla
 十分钟后或启动文件变化时重新抓取；设 `CC_REMOTE_SHELL_SNAPSHOT=off` 则每条命令都以登录 shell 运行。
 命令超时或被停止时先收到 SIGTERM，五秒后再收到 SIGKILL。
 
+**Monitor。** Claude 的 Monitor 工具监视的是你的机器。监视启动的命令在本机运行，方式和 Bash 命令一样：
+用你的登录 shell 环境，在 shell 当前所在的目录里运行。它打印的每一行都作为一个事件送到 Claude，和
+Claude Code 自己的 Monitor 一样；命令退出时监视结束。WebSocket 监视（`ws`）也在本机打开。工具本身仍由
+服务器上的 claude 运行，超时和停止按钮都照旧：运行之前，cc-remote 把这次调用改写成中继的一条命令
+`"$CC_REMOTE_PYTHON" -S "$CC_REMOTE_RELAY" monitor <令牌> '<原命令>'`，由它让你的机器执行原命令并把
+输出传回。auto 模式的分类器和 claude 的任务列表看到的就是这个形式。权限上，这条命令和 Bash 命令待遇
+相同：deny 规则会拒绝它，命令启动时也会再查一次；ask 规则会询问；allow 规则和只读命令直接放行。
+弹出的确认显示的是 Claude 原本要执行的命令，选"不再询问"会把这条命令的前缀加进你的 Bash 规则。
+链路断开期间，输出留在你的机器上，恢复后再送到 Claude。命令输出得比服务器接收得快时会被暂停，等
+服务器跟上再继续。监视结束时（超时、Claude 或你停止它、会话结束），命令所在的整个进程组都会被停掉。
+Monitor 需要下文"连接断开"里介绍的中继。Claude Code 会在后台 Bash 命令结束时通知 Claude，cc-remote 的 Bash
+做不到，所以它的说明里会建议 Claude 改用 Monitor。
+
+为了保留 Monitor，这样的会话启动服务器上的 claude 时，会用 `--tools` 列出它可用的工具，而不是用 deny
+规则禁掉 Bash：Monitor 按 Bash 的规则走，Bash 一被禁，claude 会把 Monitor 一起去掉。这份名单是 cc-remote
+所知道的 claude 内置工具，去掉会在服务器上操作的那些；新版 claude 新增的内置工具，要等 cc-remote 知道
+它之后才会出现在名单里。没有 Monitor 的会话照旧用 deny 规则禁掉这些工具。
+
 **钩子。** 本机 Claude Code 设置里的钩子在本机运行，和本地 Claude Code 的运行方式一样：来自 managed
 settings（含 `managed-settings.d`）、`~/.claude/settings.json`、项目的 `.claude/settings.json` 和
 `.claude/settings.local.json`，以及应用传入的 `--settings`，只取 `--setting-sources` 列出的来源。
@@ -406,7 +424,10 @@ PowerShell 7（`pwsh`）时用它，否则用 Windows PowerShell 5.1。Grep 需�
   PowerShell），且不支持 `CLAUDE_ENV_FILE`。
 - 文件检查点和回退记录在服务器上，因此看不到你本地的修改。
 - 从客户端桥接的 MCP 服务器只暴露工具，不暴露 resources 和 prompts。
-- LSP、Monitor 和 worktree 相关工具已关闭。
+- LSP 和 worktree 相关工具已关闭。Monitor 在 Windows 上、一次性的 `claude -p` 里以及关闭重连
+  （`CC_REMOTE_RECONNECT_GRACE=0`）时也会关闭；服务器上没有 python3 3.6 或更高版本时，它会拒绝运行，
+  并提示改用后台 Bash。WebSocket 监视收到含多行的文本帧时，会作为一行送到 Claude，换行写成 `\n`。
+  开着 Monitor 的会话里，比 cc-remote 新的内置工具不会出现（见"Monitor"一节）。
 - 重连需要服务器上有 `python3` 3.6 或更高版本。链路断开期间 claude 写到 stderr 的内容会被保留（最多
   1 MiB），但断开那一刻正在传输的部分可能丢失；会话的数据流本身不会丢。如果服务器的 systemd-logind 会在
   ssh 会话结束时杀掉该用户的进程（`KillUserProcesses=yes`），claude 就无法在连接断开后继续运行。

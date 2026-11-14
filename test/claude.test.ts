@@ -84,9 +84,16 @@ describe("hostLaunch", () => {
   });
 
   test("a one-off -p only loses the host's tools", () => {
-    const argv = ["-p", "--output-format", "text", "--tools", "Read,Grep,Glob", "--allowedTools", "Read,Grep,Glob", "--strict-mcp-config"];
-    expect(hostLaunch(argv, "/w", false).args).toEqual([
-      "-p", "--output-format", "text", "--tools", "Read,Grep,Glob", "--strict-mcp-config", "--allowedTools=Read,Grep,Glob", `--disallowedTools=${REMOVED.join(",")}`,
+    // Orca 1.4.251 and 1.4.254's chat title, as test/live/orca.test.ts saw it.
+    const argv = [
+      "-p", "--output-format", "text", "--model", "sonnet", "--tools", "Read,Grep,Glob", "--allowedTools", "Read,Grep,Glob",
+      "--permission-mode", "dontAsk", "--effort", "low", "--strict-mcp-config", "--settings", '{"disableAllHooks":true}',
+    ];
+    const launch = hostLaunch(argv, "/w", false);
+    expect(launch.mode).toBe("dontAsk");
+    expect(launch.args).toEqual([
+      "-p", "--output-format", "text", "--model", "sonnet", "--tools", "Read,Grep,Glob", "--permission-mode", "dontAsk", "--effort", "low",
+      "--strict-mcp-config", "--settings", '{"disableAllHooks":true}', "--allowedTools=Read,Grep,Glob", `--disallowedTools=${REMOVED.join(",")}`,
     ]);
   });
 });

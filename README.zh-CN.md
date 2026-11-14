@@ -408,3 +408,14 @@ bun run build                     # dist/cc-remote-{linux-x64,linux-arm64,darwin
 home、临时目录和 claude 的会话目录都是私有的，Claude 登录仍然共用。用法见 `test/e2e/client.ts` 和
 `test/e2e/fakessh` 的文件头。`test/e2e/sdk.ts` 扮演内嵌 Agent SDK 的应用（例如 Orca），在回合进行中
 弄断链路（正在运行的 Bash 调用、打开着的权限确认、冻结的链路），用来演示回合会照常继续；用法见文件头。
+
+把某个 Orca Server 版本加进 `src/setup/orca.ts` 的 `VERIFIED` 之前，先用
+`scripts/verify-orca.sh <新 bundle> [<上一个 bundle>]` 做一次真实验证，参数是 Orca 桌面端推到
+`~/.orca-remote/` 下的 orcad bundle（例如 `~/.orca-remote/orcad-0.1.0+<build>`）。脚本会复制 bundle，
+在 `/tmp` 下的临时 profile 上、本机一个空闲端口启动 orcad，把 Claude Command 设成这份代码的
+cc-remote（连接隔离的假服务器），再通过 Orca 的 RPC 驱动一个对话：本地 Bash 和 Read、经 Orca 回答的
+权限确认、Orca 生成标题的调用、重启后对话继续，给了上一个版本时还有从它升级后继续，以及 fork。Orca
+传入的任何 cc-remote 还没审过的参数（`test/live/orca.test.ts` 里的 `REVIEWED`）都会让它失败，最后
+打印应加进 `VERIFIED` 的内容。这些对话是真实的 claude 回合，用本机的 Claude 登录：四个用 Haiku 的
+小回合，加上 Orca 让 Claude 生成的对话标题。需要 1 GB 可用内存，结束时（包括失败时）会停掉它启动的一切。测试在 `test/live/`，
+直接运行 `bun test` 会跳过它。

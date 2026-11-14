@@ -479,3 +479,16 @@ folders are private to it, while the Claude login is shared. See the headers of
 `test/e2e/client.ts` and `test/e2e/fakessh`. `test/e2e/sdk.ts` stands in for an Agent SDK app such
 as Orca and breaks the link in the middle of a turn (a running Bash call, an open permission prompt,
 a frozen link) to show that the turn carries on; see its header.
+
+Before adding an Orca Server build to `VERIFIED` in `src/setup/orca.ts`, check it live with
+`scripts/verify-orca.sh <new-bundle> [<previous-bundle>]`, passing the orcad bundles the Orca desktop
+pushed to `~/.orca-remote/` (such as `~/.orca-remote/orcad-0.1.0+<build>`). It copies each bundle,
+starts orcad on a throwaway profile under `/tmp` on a free local port, sets the Claude Command to this
+checkout's cc-remote on the isolated fake host, and drives a chat over Orca's RPC: local Bash and Read,
+a permission prompt answered through Orca, Orca's title call, the chat carrying on after a restart
+and, with a previous build, after updating from it, and a fork. It fails on any flag Orca passes that
+cc-remote hasn't reviewed (`REVIEWED` in `test/live/orca.test.ts`) and ends by printing what to add
+to `VERIFIED`. The chats are real claude turns on this machine's Claude login: four small ones on
+Haiku, plus the chat title Orca has Claude write. It needs 1 GB of free memory and stops everything
+it started, also after a failure.
+The test lives in `test/live/` and plain `bun test` skips it.

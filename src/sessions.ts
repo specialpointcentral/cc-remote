@@ -64,9 +64,11 @@ export function mirrorKey(filePath: string): SessionKey | undefined {
 
 /**
  * The remote claude writes the transcript on its host, and mirrors each entry back over the SDK
- * channel. This writes the mirror where a local claude would have written the file, so ACP's
- * session list, history replay, fork and titles read it like any other session. load() returns
- * nothing: the host still has its own copy to resume from.
+ * channel. The proxy writes the mirror where a local claude would have written the file, so ACP's
+ * session list, history replay, fork and titles read it like any other session, and a hook reading
+ * the transcript finds it as current as the stream. Given to the SDK, this store turns the mirror
+ * on; append() is there for the SDK's sake. load() returns nothing: the host still has its own
+ * copy to resume from.
  */
 export const mirror: SessionStore = {
   async append(key: SessionKey, entries: SessionStoreEntry[]) {

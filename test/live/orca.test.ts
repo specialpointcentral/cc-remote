@@ -238,10 +238,33 @@ else describe("cc-remote as Orca's Claude Command, live", () => {
 
   const chatLaunches = () => launches(log).filter((l) => l.cwd === project && l.args.includes("--input-format"));
 
+  /**
+   * Hooks in the throwaway home's Claude settings, as a user (or Orca) would put them on the project
+   * machine: each run appends what it got to hooks.jsonl, with what it found at transcript_path,
+   * and prints nothing, so the chat goes on as without them.
+   */
+  const hookLog = join(work, "hooks.jsonl");
+  function writeHookSettings() {
+    const script = join(work, "hook.ts");
+    writeFileSync(script, `const fs = require("node:fs");
+const input = JSON.parse(await Bun.stdin.text());
+let transcript = { path: input.transcript_path, exists: false, hasWord: false };
+try { const text = fs.readFileSync(input.transcript_path, "utf8"); transcript = { path: input.transcript_path, exists: true, hasWord: text.includes(process.argv[2]) }; } catch {}
+fs.appendFileSync(process.argv[3], JSON.stringify({ event: input.hook_event_name, cwd: input.cwd, projectDir: process.env.CLAUDE_PROJECT_DIR, tool: input.tool_name, command: input.tool_input?.command, transcript }) + "\\n");
+`);
+    const hook = [{ type: "command", command: `${process.execPath} ${script} ${word} ${hookLog}` }];
+    mkdirSync(join(home, ".claude"), { recursive: true });
+    writeFileSync(join(home, ".claude", "settings.json"), JSON.stringify({
+      hooks: { SessionStart: [{ hooks: hook }], UserPromptSubmit: [{ hooks: hook }], PreToolUse: [{ matcher: "Bash", hooks: hook }], Stop: [{ hooks: hook }] },
+    }, null, 2));
+  }
+  const hookRuns = (): any[] => (existsSync(hookLog) ? readFileSync(hookLog, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)) : []);
+
   beforeAll(async () => {
     if (realHome === home || !home.startsWith("/tmp/")) throw new Error(`refusing to run Orca on ${home}: not a throwaway home`);
     for (const live of [profile, project]) mkdirSync(live, { recursive: true, mode: 0o700 });
     writeFileSync(join(project, "local-only.txt"), `${secret}\n`);
+    writeHookSettings();
     writeClaudeCommand({ work, token, log, state, cache: join(work, "cache"), realHome, host: HOST });
     port = await freePort();
     watchMemory();
@@ -305,6 +328,29 @@ Then reply with only the text you read from local-only.txt.`);
       bash.length ? `Orca showed ${JSON.stringify(bash[0].title)} with options ${bash[0].options.join(" / ")}; answered "${bash[0].chose}", and the command ran` : `no prompt for the Bash command reached Orca (${t1!.approvals.length} prompts in all)`);
     expect(bash.length).toBeGreaterThan(0);
     expect(bash.every((a) => a.ok)).toBe(true);
+  });
+
+  test("the hooks in the project machine's Claude settings ran there, with its paths", () => {
+    expect(t1).toBeDefined();
+    const runs = hookRuns();
+    const by = (event: string) => runs.filter((r) => r.event === event);
+    // The local mirror, under the throwaway home (or the config folder Orca names there).
+    const local = runs.every((r) => r.cwd === project && r.projectDir === project && typeof r.transcript.path === "string" && r.transcript.path.startsWith(`${home}/`) && r.transcript.path.includes("/projects/"));
+    const bash = by("PreToolUse").find((r) => r.tool === "Bash" && String(r.command).includes("bash-proof"));
+    const stop = by("Stop").at(-1);
+    const ok = local && by("UserPromptSubmit").length > 0 && !!bash && !!stop?.transcript.exists && !!stop?.transcript.hasWord;
+    // Orca's own agent status hooks, if it put any in the same settings file.
+    let orca = "none";
+    try {
+      const hooks = JSON.parse(readFileSync(join(home, ".claude", "settings.json"), "utf8")).hooks ?? {};
+      const theirs = Object.entries(hooks).flatMap(([event, groups]: [string, any]) => (groups as any[]).flatMap((g) => g.hooks ?? []).filter((h: any) => !String(h.command ?? "").includes("hook.ts")).map(() => event));
+      if (theirs.length) orca = [...new Set(theirs)].join(",");
+    } catch {}
+    record("hooks", ok ? "pass" : "fail", `runs: ${runs.map((r) => r.event + (r.tool ? `:${r.tool}` : "")).join(" ") || "none"}; all with the local cwd, CLAUDE_PROJECT_DIR and transcript path: ${local}; the Stop hook found the local transcript ${stop?.transcript.exists ? "" : "NOT "}there${stop?.transcript.hasWord ? ", with this turn's prompt in it" : ", WITHOUT this turn's prompt"}; Orca's own hooks in the settings: ${orca}`);
+    expect(local).toBe(true);
+    expect(by("UserPromptSubmit").length).toBeGreaterThan(0);
+    expect(bash).toBeDefined();
+    expect(stop?.transcript).toMatchObject({ exists: true, hasWord: true });
   });
 
   test("Orca's chat-title one-off (claude -p) runs through cc-remote", async () => {

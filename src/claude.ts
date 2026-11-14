@@ -3,6 +3,7 @@ import { runClaude } from "./auth-cache";
 import { bridgeAll } from "./bridge";
 import { sdkHost } from "./control";
 import { grantsSession } from "./grants";
+import { sessionHooks } from "./hooks";
 import type { HostProcess } from "./host-process";
 import { localMcpServers } from "./mcp";
 import { environment } from "./prompt";
@@ -97,8 +98,10 @@ export async function claudeCompat(host: string, argv: string[]): Promise<void> 
   const ws = workspace(cwd);
   // The command line's servers win over the local config's, as the ACP client's do.
   const servers = { ...bridgeAll({ ...local, ...plan.mcpServers }, cwd, closing.signal), cc: localTools(ws) };
-  const child = launch(host, cwd, plan.args, { ...env, CLAUDE_CODE_DISABLE_CLAUDE_MDS: "1" }, plan.uploads, undefined, tellTools(host, ws));
-  const session = { cwd, hostDir: hostDir(cwd), mode: plan.mode, dirs: plan.addDirs, ws, sessionId: grantsSession(plan.args) };
+  // The hooks of this machine's settings: run here, or by the host claude through its --settings.
+  const hooks = sessionHooks(cwd, plan.args, ws);
+  const child = launch(host, cwd, plan.args, { ...env, CLAUDE_CODE_DISABLE_CLAUDE_MDS: "1" }, plan.uploads, undefined, tellTools(host, ws), hooks.host);
+  const session = { cwd, hostDir: hostDir(cwd), mode: plan.mode, dirs: plan.addDirs, ws, sessionId: grantsSession(plan.args), hooks };
   const sdk = proxy(asChild(child), session, (toClaude) => sdkHost(servers, prompt, toClaude));
   process.stdin.pipe(sdk.stdin);
   sdk.stdout.pipe(process.stdout);

@@ -10,8 +10,9 @@ import { sessionHooks } from "./hooks";
 import { HostProcess, type RelayPlan, type WatchLink } from "./host-process";
 import { Monitors } from "./monitor";
 import { WINDOWS } from "./platform";
-import { projectTrees } from "./project-claude";
+import { projectTrees, stamp } from "./project-claude";
 import { proxy } from "./proxy";
+import { redaction } from "./redact";
 import { type ExecResult, RELAY_PATH, RELAY_SOURCE } from "./relay";
 import { localTranscript } from "./sessions";
 import { quote, REMOTE_PATH } from "./sh";
@@ -102,8 +103,16 @@ export type RelayStart = { id: string; sessionId?: string; grace: number; idle: 
 /**
  * The shell command the host runs: enter the folder, run `check` when given, then exec claude.
  * With `relay`, claude starts under the relay when the check found a python3 for it ($py).
+ * Under redaction (redact.ts) this machine's values in it, the folder's name among them, are
+ * placeholders, and claude doesn't get the ssh session's variables, which hold this machine's address.
  */
 export function remoteCommand(args: string[], env: Record<string, string>, cwd: string, check?: string, relay?: RelayStart): string {
+  const r = redaction();
+  const scrub = r.on ? "unset SSH_CONNECTION SSH_CLIENT SSH_TTY; " : "";
+  return r.text(`${scrub}${plainCommand(args, env, cwd, check, relay)}`);
+}
+
+function plainCommand(args: string[], env: Record<string, string>, cwd: string, check?: string, relay?: RelayStart): string {
   const vars = Object.entries(env).map(([k, v]) => quote(`${k}=${v}`));
   const claude = `env ${vars.join(" ")} claude ${args.map(quote).join(" ")}`;
   let start = `${REMOTE_PATH} exec ${claude}`;
@@ -290,10 +299,11 @@ export function launch(
   if (stream && !grace) notice("reconnection is off (CC_REMOTE_RECONNECT_GRACE=0): a dropped connection ends the session's claude");
   const relayed = stream && grace > 0;
   if (relayed) needs.push({ kind: "relay", remote: RELAY_PATH, data: RELAY_SOURCE });
+  const r = redaction();
   const resume = argument(args, "--resume", "-r");
   const transcript = resume ? localTranscript(resume, cwd) : undefined;
-  if (resume && transcript) needs.push({ kind: "transcript", local: transcript, sessionId: resume });
-  const project = projectTrees(cwd);
+  if (resume && transcript) needs.push({ kind: "transcript", local: transcript, sessionId: resume, filter: r.on ? (b) => r.jsonLines(b) : undefined });
+  const project = redactedTrees(cwd);
   if (project.files.length) needs.push({ kind: "project", files: project.files, stamp: project.stamp });
 
   // Versioned like the rest of what cc-remote leaves on a stream or a host, though only this
@@ -325,7 +335,7 @@ export function launch(
       if (project.skipped.length && missing.some((i) => needs[i]!.kind === "project")) {
         console.error(`cc-remote: not copying to the host: ${project.skipped.join(", ")}`);
       }
-      return { argv: [...ssh(shared), `${enter(cwd)} && ${installScript(needs, missing)}`], input: bundle(needs, missing) };
+      return { argv: [...ssh(shared), r.text(`${enter(cwd)} && ${installScript(needs, missing)}`)], input: bundle(needs, missing) };
     },
     tokens,
     ready: (rest) => {
@@ -340,6 +350,15 @@ export function launch(
     relay,
   });
   return child;
+}
+
+/** The project's commands, skills and agents as the host gets them: under redaction, with this machine's values replaced. */
+function redactedTrees(cwd: string): ReturnType<typeof projectTrees> {
+  const r = redaction();
+  const project = projectTrees(cwd);
+  if (!r.on || !project.files.length) return project;
+  const files = project.files.map((f) => ({ ...f, path: r.text(f.path), data: r.bytes(f.data) }));
+  return { files, skipped: project.skipped, stamp: stamp(files) };
 }
 
 /** The host process where the proxy expects a ChildProcess: it uses only what both offer. */

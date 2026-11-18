@@ -19,6 +19,7 @@ export const TEAMS_OFF = ' [--settings] [{"env":{"CLAUDE_CODE_EXPERIMENTAL_AGENT
  *   handshake over a slow link;
  * - FAKE_CLAUDE_MONITOR: claude runs a line `MONITOR <token>` as its Monitor tool would run a
  *   command cc-remote rewrote (monitor.ts), and prints `monitor exit <status>` after it.
+ * - FAKE_CLAUDE_TEE: a file where claude also writes its arguments and stdin, as it received them.
  *
  * And for setup's checks, all off unless set:
  *
@@ -106,6 +107,10 @@ if [ -n "$FAKE_CLAUDE_MONITOR" ]; then
     esac
   done
   exit 0
+fi
+if [ -n "$FAKE_CLAUDE_TEE" ]; then
+  { printf 'ARGS'; for a; do printf ' [%s]' "$a"; done; printf '\n'; } >> "$FAKE_CLAUDE_TEE"
+  exec tee -a "$FAKE_CLAUDE_TEE"
 fi
 exec cat
 `);

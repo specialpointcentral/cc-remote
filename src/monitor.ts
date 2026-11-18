@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { constants } from "node:os";
 import type { Watcher, WatchLink } from "./host-process";
 import { SHELL, WINDOWS } from "./platform";
+import { redaction } from "./redact";
 import { refusal, type ShellTool } from "./rules";
 import { quote } from "./sh";
 import { loginLaunch } from "./tools/login";
@@ -52,6 +53,8 @@ type Running = {
   /** Reading stdout waits on this while the host has too much of it. */
   resume?: () => void;
   readers: ReadableStreamDefaultReader<Uint8Array>[];
+  /** Sends what a line filter still holds (redaction): before the command's end is reported. */
+  flushers: (() => void)[];
 };
 
 const encode = (text: string) => new TextEncoder().encode(text);
@@ -143,12 +146,12 @@ export class Monitors implements Watcher {
 
   private fail(id: number, message: string) {
     this.running.delete(id);
-    this.link.stderr(id, encode(`${message}\n`));
+    this.link.stderr(id, encode(`${redaction().text(message)}\n`));
     this.link.end(id, 1);
   }
 
   private async spawn(id: number, command: string, cwd: string) {
-    const r: Running = { stopped: false, readers: [] };
+    const r: Running = { stopped: false, readers: [], flushers: [] };
     this.running.set(id, r);
     // A login shell snapshot that failed to load means the command never started: one more launch.
     for (let attempt = 0; ; attempt++) {
@@ -169,6 +172,7 @@ export class Monitors implements Watcher {
         if (drained || r.stopped || !r.resume) break;
       }
       for (const reader of r.readers.splice(0)) void reader.cancel().catch(() => {});
+      for (const flush of r.flushers.splice(0)) flush();
       if (!r.stopped) stopLeftovers(proc.pid);
       groups.delete(proc.pid);
       const never = launch.done?.() === true;
@@ -180,18 +184,29 @@ export class Monitors implements Watcher {
     }
   }
 
-  /** Passes a stream on to the host; stdout only as fast as the host takes it. */
+  /**
+   * Passes a stream on to the host; stdout only as fast as the host takes it. Under redaction it
+   * goes a line at a time, with this machine's values replaced.
+   */
   private async pipe(id: number, r: Running, stream: ReadableStream<Uint8Array>, stdout: boolean) {
     const reader = stream.getReader();
     r.readers.push(reader);
+    const redact = redaction();
+    const lines = redact.on ? redact.lines("redact") : undefined;
+    const send = (chunk: Uint8Array) => {
+      if (!chunk.length) return;
+      if (stdout) this.link.output(id, chunk);
+      else this.link.stderr(id, chunk);
+    };
+    if (lines) r.flushers.push(() => send(lines.flush()));
     try {
       for (;;) {
         while (stdout && !r.stopped && this.link.pending(id) > MAX_PENDING) await new Promise<void>((go) => (r.resume = go));
         if (r.stopped) return;
         const { done, value } = await reader.read();
-        if (done || r.stopped) return;
-        if (stdout) this.link.output(id, value);
-        else this.link.stderr(id, value);
+        if (r.stopped) return;
+        if (done) return void (lines && send(lines.flush()));
+        send(lines ? lines.push(value) : value);
       }
     } catch {
       // Cancelled: the command was stopped, or left a child holding its output.
@@ -205,10 +220,10 @@ export class Monitors implements Watcher {
     } catch (e) {
       return this.fail(id, `cc-remote: could not open ${spec.url}: ${(e as Error).message}`);
     }
-    const r: Running = { stopped: false, socket, readers: [] };
+    const r: Running = { stopped: false, socket, readers: [], flushers: [] };
     this.running.set(id, r);
     socket.binaryType = "arraybuffer";
-    const line = (text: string) => this.link.output(id, encode(`${text}\n`));
+    const line = (text: string) => this.link.output(id, encode(`${redaction().text(text)}\n`));
     // Frames dropped while the host was behind, said once it catches up, or at the end.
     let dropped = 0;
     const tell = () => {
@@ -227,7 +242,7 @@ export class Monitors implements Watcher {
       tell();
       this.running.delete(id);
       const clean = e.code === 1000 || e.code === 1005;
-      if (!clean) this.link.stderr(id, encode(`cc-remote: ${spec.url} closed: ${e.code}${e.reason ? ` ${e.reason}` : ""}\n`));
+      if (!clean) this.link.stderr(id, encode(redaction().text(`cc-remote: ${spec.url} closed: ${e.code}${e.reason ? ` ${e.reason}` : ""}\n`)));
       this.link.end(id, clean ? 0 : 1);
     });
   }

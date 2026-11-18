@@ -13,6 +13,7 @@ import { main as setup } from "./setup/index";
 import { main as update } from "./update/index";
 import { refreshLatest, updateNotice } from "./update/notice";
 import { remote } from "./options";
+import { RedactionError, redaction } from "./redact";
 import { settingsProblems } from "./rules";
 import { stopRelays } from "./host-process";
 import { WINDOWS } from "./platform";
@@ -70,6 +71,19 @@ function parse(argv: string[]) {
   return args;
 }
 
+/**
+ * Reads the redaction settings before anything goes to the host: when they're on but can't be
+ * used, nothing starts, rather than send this machine's values unfiltered.
+ */
+function checkRedaction() {
+  try {
+    return redaction();
+  } catch (e) {
+    if (e instanceof RedactionError) return fail(`${e.message}. Fix it, or run cc-remote setup again`);
+    throw e;
+  }
+}
+
 async function host(flag?: string): Promise<string> {
   const file = Bun.file(`${home}/.config/cc-remote/host`);
   const found = flag ?? Bun.env.CC_REMOTE_HOST ?? ((await file.exists()) ? (await file.text()).trim() : "");
@@ -86,6 +100,11 @@ async function doctor(target: string) {
   console.log(`remote claude: ${out}`);
   const problem = tooOld(target, out);
   if (problem) fail(problem);
+  const r = checkRedaction();
+  if (r.on) {
+    const kinds = [...new Set(r.values.map((v) => v.kind))].join(", ");
+    console.log(`redaction: on, ${r.values.length} values (${kinds})${r.skipped.length ? `; too short to replace: ${r.skipped.map((v) => v.text).join(", ")}` : ""}`);
+  } else console.log(r.active ? "redaction: off (earlier placeholders are still restored)" : "redaction: off");
   // Local, and per project: the rules the local shell tool goes by, read from here.
   for (const p of settingsProblems(process.cwd())) {
     console.log(`warning: ${p}. Until it's fixed, every local shell command here asks for approval first (dontAsk mode refuses them).`);
@@ -162,6 +181,7 @@ if (args.sub) {
   process.exit(await main(args.host && args.sub.name === "setup" ? ["--host", args.host, ...args.sub.argv] : args.sub.argv));
 } else if (args.claude) {
   const target = await host(args.host);
+  checkRedaction();
   process.on("exit", killAll);
   await claudeCompat(target, args.claude);
 } else if (args.help) {
@@ -170,6 +190,7 @@ if (args.sub) {
   console.log(`${pkg.version} (cc-remote, claude-agent-acp ${acpPkg.version})`);
 } else {
   const target = await host(args.host);
+  if (!args.doctor) checkRedaction();
   process.on("exit", killAll);
   if (args.cli) process.exit(await runClaude(target, args.cli, process.cwd()));
   else if (args.doctor) await doctor(target);

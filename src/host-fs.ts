@@ -1,6 +1,7 @@
 import { posix } from "node:path";
 import type { Ready } from "./host-files";
 import { REFUSED } from "./host-process";
+import { redaction } from "./redact";
 import { keyFor } from "./sessions";
 import type { ExecResult } from "./relay";
 import { quote } from "./sh";
@@ -44,6 +45,9 @@ export class HostFiles {
   /** Where markdown files are memory, which claude writes without asking: the auto memory, and subagents'. */
   private readonly memory: string[];
   private readonly roots: string[];
+  /** The roots, and the task folders' pattern, as the model sees them: placeholders restored (redact.ts). */
+  private readonly shown: [shown: string, root: string][];
+  private readonly key: string;
   private readonly tasks: RegExp;
   private readonly home: string;
 
@@ -56,7 +60,10 @@ export class HostFiles {
     this.plans = posix.join(config, "plans");
     this.memory = [posix.join(project, "memory"), agents];
     this.roots = [this.plans, project, agents];
-    this.tasks = new RegExp(`/claude-\\d+/${escape(key)}/[^/]+/tasks(/|$)`);
+    const r = redaction();
+    this.shown = this.roots.map((root) => [r.restore(root), root]);
+    this.key = key;
+    this.tasks = new RegExp(`^(.*/claude-\\d+/)${escape(r.restore(key))}(/[^/]+/tasks(?:/.*)?)$`);
   }
 
   /** The host's view of what the session-start check found, if it found a usable one. */
@@ -70,12 +77,21 @@ export class HostFiles {
     return run(this.host, script, input, this.exec);
   }
 
-  /** The host path a tool was given, normalized, when it names one of the host's own files. */
+  /**
+   * The host path a tool was given, normalized, when it names one of the host's own files. Under
+   * redaction the model sees the host's folders with this machine's values restored, while on the
+   * host their names have placeholders: the folder is matched as the model sees it, and the path
+   * returned is the host's, the rest of it with this machine's values replaced. The host's own
+   * part (its home, which may have the same user name as this machine's) is left as it is.
+   */
   own(path: string): string | undefined {
     const full = path === "~" || path.startsWith("~/") ? posix.join(this.home, path.slice(1)) : path;
     if (!full.startsWith("/")) return undefined;
     const p = posix.normalize(full);
-    return this.roots.some((r) => p === r || p.startsWith(`${r}/`)) || this.tasks.test(p) ? p : undefined;
+    const r = redaction();
+    for (const [shown, root] of this.shown) if (p === shown || p.startsWith(`${shown}/`)) return root + r.text(p.slice(shown.length));
+    const task = this.tasks.exec(p);
+    return task ? `${task[1]}${this.key}${r.text(task[2]!)}` : undefined;
   }
 
   /**
@@ -91,20 +107,22 @@ export class HostFiles {
 
   /** The file's content, or why there is none. Throws when the host can't be asked. */
   async read(path: string): Promise<Uint8Array<ArrayBuffer> | "missing" | "directory"> {
+    const redact = redaction();
     const r = await this.run((start) =>
       `f=${quote(path)}; if [ -d "$f" ]; then exit ${DIRECTORY}; elif [ -f "$f" ]; then ${start} && exec cat -- "$f"; else exit ${MISSING}; fi`);
     if (r.code === MISSING) return "missing";
     if (r.code === DIRECTORY) return "directory";
     if (r.code !== 0 || !r.out) throw new Error(`could not read ${path} on ${this.host}${r.err ? `: ${r.err}` : ""}`);
-    return r.out;
+    return redact.restoreBytes(r.out) as Uint8Array<ArrayBuffer>;
   }
 
   /** The files below a folder, as paths relative to it, at most `max` of them; "missing" when there is no such folder. */
   async list(dir: string, max = 10_000): Promise<string[] | "missing"> {
+    const redact = redaction();
     const r = await this.run((start) => `cd -- ${quote(dir)} 2>/dev/null || exit ${MISSING}; ${start} && find . -type f | head -n ${max}`);
     if (r.code === MISSING) return "missing";
     if (r.code !== 0 || !r.out) throw new Error(`could not list ${dir} on ${this.host}${r.err ? `: ${r.err}` : ""}`);
-    return new TextDecoder().decode(r.out).split("\n").filter(Boolean).map((f) => f.replace(/^\.\//, "")).sort();
+    return redact.restore(new TextDecoder().decode(r.out)).split("\n").filter(Boolean).map((f) => f.replace(/^\.\//, "")).sort();
   }
 
   /**
@@ -112,9 +130,10 @@ export class HostFiles {
    * is private, as claude keeps these. Returns whether the file was there before.
    */
   async write(path: string, content: string): Promise<boolean> {
+    const redact = redaction();
     const r = await this.run((start) =>
       `umask 077; f=${quote(path)}; mkdir -p -- "$(dirname -- "$f")" || exit 1; if [ -d "$f" ]; then exit ${DIRECTORY}; fi; e=0; [ ! -e "$f" ] || e=1; cat > "$f" && ${start} && echo "$e"`,
-      new TextEncoder().encode(content));
+      new TextEncoder().encode(redact.text(content)));
     if (r.code === DIRECTORY) throw new Error(`EISDIR: illegal operation on a directory, open '${path}' on ${this.host}`);
     if (r.code !== 0 || !r.out) throw new Error(`could not write ${path} on ${this.host}${r.err ? `: ${r.err}` : ""}`);
     return new TextDecoder().decode(r.out).trim() === "1";

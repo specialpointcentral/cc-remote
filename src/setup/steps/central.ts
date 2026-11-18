@@ -1,9 +1,9 @@
-import { hostname } from "node:os";
 import { REFUSED } from "../../host-process";
 import { REMOTE_PATH, rsh } from "../../ssh";
 import { rememberVersion, versionNumber } from "../../version";
 import { type Abort, type Facts, remoteChecks } from "../checks/remote";
 import type { Ctx } from "../context";
+import { machineLabel } from "../redact";
 import { markerName, parseProbe, type Probe, probeScript, sshError } from "../remote-probe";
 import { endStep } from "../report";
 import { t } from "../ui/i18n";
@@ -35,7 +35,7 @@ export async function stepCentral(ctx: Ctx, host: string, base: string[], machin
   const label = ctx.mode.check ? host : t(`Checking ${host}`, `检查 ${host}`);
   ctx.progress.begin(label);
   const token = `cc-remote-setup-${crypto.randomUUID()}`;
-  const machine = markerName(hostname()) ?? "unnamed";
+  const machine = markerName(machineLabel(ctx) ?? "") ?? "unnamed";
   const r = await ctx.run([...base, host, "/bin/sh -s"], { input: probeScript(token, machine), timeoutMs: 120_000 });
   const probe = parseProbe(r.stdout, token);
   if (!probe) {

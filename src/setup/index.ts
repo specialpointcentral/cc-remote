@@ -46,6 +46,9 @@ Nothing is installed or changed without asking; safe to run again.
   --orca-profile <dir>         Orca's profile folder ($CC_REMOTE_ORCA_PROFILE)
   --orca-env                   copy CC_REMOTE_SSH and friends into Orca's Claude environment
   --orca-permission auto|keep  offer permission mode auto for Orca's Claude chats (default auto)
+  --redact on|off              replace this machine's host name, addresses, user name and machine
+                               id with placeholders in all that goes to the server (default off)
+  --redact-names <a,b,...>     more names to replace: internal domains, hosts, code names
   --smoke                      afterwards, send one tiny real prompt (costs tokens)
   --lang en|zh                 language ($CC_REMOTE_LANG, else from the locale)
   --no-progress, --no-color    plain output ($CC_REMOTE_NO_PROGRESS=1, $NO_COLOR)
@@ -69,6 +72,9 @@ Nothing is installed or changed without asking; safe to run again.
   --orca-profile <目录>        Orca 的 profile 目录（$CC_REMOTE_ORCA_PROFILE）
   --orca-env                   把 CC_REMOTE_SSH 等变量复制到 Orca 的 Claude 环境变量
   --orca-permission auto|keep  为 Orca 的 Claude 聊天提供 auto 权限模式（默认 auto）
+  --redact on|off              发往服务器的内容里，把本机的主机名、IP、用户名和机器 ID
+                               换成占位符（默认关闭）
+  --redact-names <a,b,...>     另外要替换的名字：内部域名、主机名、项目代号等
   --smoke                      最后发送一次很小的真实提问（消耗 token）
   --lang en|zh                 语言（$CC_REMOTE_LANG，否则按 locale）
   --no-progress, --no-color    纯文本输出（$CC_REMOTE_NO_PROGRESS=1、$NO_COLOR）

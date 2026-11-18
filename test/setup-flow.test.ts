@@ -23,6 +23,9 @@ afterEach(() => {
 const marker = (w: World) => join(w.host.home, ".cc-remote", "machines", `${hostname()}.json`);
 const state = (w: World) => JSON.parse(readFileSync(w.file(".config", "cc-remote", "setup-state.json"), "utf8"));
 const yes = (expect: RegExp): Answer => ({ expect, keys: ["\r"] });
+/** Step 1's redaction question, asked at a terminal until it was answered once; Enter is no. */
+const REDACT = /Replace them with placeholders.*\[y\/N\] $/;
+const noRedaction: Answer = { expect: REDACT, keys: ["\r"] };
 
 describe("first run at a terminal", () => {
   test("checks, connects, fixes ssh-agent dependence, saves, configures Orca and verifies", async () => {
@@ -34,6 +37,7 @@ describe("first run at a terminal", () => {
       env: { SSH_AUTH_SOCK: "/tmp/agent.sock", FAKE_AGENTLESS_DENY: "1" },
       answers: [
         { expect: /Run `sudo apt-get install -y ripgrep git` now\? sudo may ask for your password\. \[y\/N\] $/, keys: ["\r"] },
+        noRedaction,
         { expect: /Central server \(ssh host, user@host or ~\/\.ssh\/config alias\) \[central\]: $/, keys: ["cen", "\t", "\r"] },
         yes(/Create ~\/\.ssh\/cc-remote_ed25519 \(no passphrase\) for cc-remote and copy it to central\? \[Y\/n\] $/),
         yes(/Save central as the default server \(~\/\.config\/cc-remote\/host\)\? \[Y\/n\] $/),
@@ -90,6 +94,10 @@ describe("first run at a terminal", () => {
     const w = make({ orca: true, tools: ["sh", "bash", "grep", "ssh-keygen", "rg", "git"] });
     expect((await runSetup(w, ["--yes", "--host", "central", "--orca-env"])).code).toBe(0);
     const mutations = w.orca!.mutations().length;
+    // The unattended run left redaction unanswered: the first run at a terminal asks it, once.
+    const first = await runSetup(w, [], { tty: true, answers: [noRedaction, { expect: /Central server \[central\]: $/, keys: ["\r"] }] });
+    expect(first.left).toBe(0);
+    expect(first.out.match(/\[Y\/n\]|\[y\/N\]/g)).toEqual(["[y/N]"]);
     const r = await runSetup(w, [], { tty: true, answers: [{ expect: /Central server \[central\]: $/, keys: ["\r"] }] });
     expect(r.code).toBe(0);
     expect(r.left).toBe(0);
@@ -100,13 +108,31 @@ describe("first run at a terminal", () => {
     expect(w.orca!.mutations()).toHaveLength(mutations);
   }, 60_000);
 
+  test("--redact on: saved with a key of its own, and the server knows this machine by a placeholder", async () => {
+    const w = make({ orca: true, tools: ["sh", "bash", "grep", "ssh-keygen", "rg", "git"] });
+    const r = await runSetup(w, ["--yes", "--host", "central", "--redact", "on", "--redact-names", "corp.example.com,x"]);
+    expect(r.code).toBe(0);
+    const config = JSON.parse(readFileSync(w.file(".config", "cc-remote", "redact.json"), "utf8"));
+    expect(config).toEqual({ enabled: true, names: ["corp.example.com"] });
+    expect(statSync(w.file(".config", "cc-remote", "redact.key")).mode & 0o777).toBe(0o600);
+    expect(r.out).toContain("left out x");
+    expect(r.out).toMatch(/redaction\s+on: replaces host name /);
+    const markers = readdirSync(join(w.host.home, ".cc-remote", "machines"));
+    expect(markers).toEqual([expect.stringMatching(/^ccr-host-[0-9a-f]{8}\.json$/)]);
+    expect(existsSync(marker(w))).toBe(false);
+    expect(state(w).actions.find((a: { id: string }) => a.id === "local.redact")).toMatchObject({ previous: null, value: config });
+    // Unattended without the flag, it stays as it is.
+    expect((await runSetup(w, ["--yes", "--host", "central"])).code).toBe(0);
+    expect(JSON.parse(readFileSync(w.file(".config", "cc-remote", "redact.json"), "utf8"))).toEqual(config);
+  }, 60_000);
+
   test("Up browses the server history and Tab completes after user@", async () => {
     const w = make({ tools: ["sh", "bash", "grep", "rg", "git"] });
     writeFileSync(w.file(".ssh", "known_hosts"), "|1|hashed= ssh-ed25519 AAAA\n[box.example]:2222 ssh-ed25519 AAAA\n");
     const r = await runSetup(w, [], {
       tty: true,
       env: { FAKE_SSH_FAIL: "refused" },
-      answers: [{ expect: /alias\) \[central\]: $/, keys: ["me@cen", "\t", "\r"] }],
+      answers: [noRedaction, { expect: /alias\) \[central\]: $/, keys: ["me@cen", "\t", "\r"] }],
     });
     expect(r.left).toBe(0);
     expect(r.out).toContain("Central server: me@central");
@@ -205,6 +231,7 @@ describe("unattended", () => {
       tty: true,
       answers: [
         { expect: /Run `sudo apt-get install -y ripgrep git` now\?.*\[y\/N\] $/, keys: ["y", "\r"] },
+        noRedaction,
         yes(/Save central as the default server.*\[Y\/n\] $/),
       ],
     });
@@ -270,7 +297,7 @@ describe("ssh problems", () => {
     const r = await runSetup(w, ["--host", "central"], {
       tty: true,
       env: { FAKE_SSH_FAIL: "hostkey" },
-      answers: [yes(/Let OpenSSH show the fingerprint and ask you to trust it\? \[Y\/n\] $/), yes(/Save central as the default server.*\[Y\/n\] $/)],
+      answers: [noRedaction, yes(/Let OpenSSH show the fingerprint and ask you to trust it\? \[Y\/n\] $/), yes(/Save central as the default server.*\[Y\/n\] $/)],
     });
     expect(r.left).toBe(0);
     expect(r.code).toBe(0);

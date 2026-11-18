@@ -1,10 +1,10 @@
-import { hostname } from "node:os";
 import { join } from "node:path";
 import { hostFileDecision } from "../args";
 import { saveRemote } from "../actions/remote";
 import type { Check, Ctx } from "../context";
 import { writePrivate } from "../files";
 import { pushHistory } from "../history";
+import { machineLabel } from "../redact";
 import { markerName, parseMarker, type Probe } from "../remote-probe";
 import { endStep } from "../report";
 import { t } from "../ui/i18n";
@@ -42,7 +42,8 @@ export async function stepSave(ctx: Ctx, host: string, base: string[], probe: Pr
     checks.push({ id: "S1", status: "info", label: "host", detail: t(`CC_REMOTE_HOST=${ctx.env.CC_REMOTE_HOST} overrides the host file in your shell`, `你的 shell 中 CC_REMOTE_HOST=${ctx.env.CC_REMOTE_HOST} 优先于 host 文件`) });
   }
 
-  const machine = markerName(hostname());
+  // Under redaction (src/redact.ts) the marker is named after the host name's placeholder.
+  const machine = markerName(machineLabel(ctx) ?? "");
   if (!machine) {
     checks.push({ id: "S2", status: "warn", label: t("machine", "机器"), detail: t("this hostname can't name a marker file; no marker written", "这个主机名不能用作标记文件名；未写入标记") });
   } else {

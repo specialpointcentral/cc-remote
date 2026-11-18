@@ -23,6 +23,8 @@ export type Options = {
   orcaProfile?: string;
   orcaEnv: boolean;
   orcaPermission: "auto" | "keep";
+  redact?: "on" | "off";
+  redactNames?: string[];
   smoke: boolean;
   lang?: "en" | "zh";
   noProgress: boolean;
@@ -65,6 +67,8 @@ export function parseArgs(argv: string[], env: Record<string, string | undefined
       case "--orca-profile": o.orcaProfile = value(); break;
       case "--orca-env": o.orcaEnv = true; break;
       case "--orca-permission": o.orcaPermission = choice(flag, value(), ["auto", "keep"] as const); break;
+      case "--redact": o.redact = choice(flag, value(), ["on", "off"] as const); break;
+      case "--redact-names": o.redactNames = value().split(",").map((n) => n.trim()).filter(Boolean); break;
       case "--smoke": o.smoke = true; break;
       case "--lang": o.lang = choice(flag, value(), ["en", "zh"] as const); break;
       case "--no-progress": o.noProgress = true; break;
@@ -75,6 +79,7 @@ export function parseArgs(argv: string[], env: Record<string, string | undefined
     }
   }
   if (o.check && (o.install || o.smoke)) throw new UsageError(`--check changes nothing, so it can't be combined with ${o.install ? "--install" : "--smoke"}`);
+  if (o.check && (o.redact || o.redactNames)) throw new UsageError("--check changes nothing, so it can't be combined with --redact or --redact-names");
   return o;
 }
 
@@ -138,6 +143,16 @@ export function permissionDecision(o: Options, m: Mode, p: { current: string; is
   if (m.check || o.orca === "skip" || o.orcaPermission === "keep" || !autoOffered || p.current === "auto") return "skip";
   if (m.interactive) return p.isDefault ? "ask-yes" : "ask-no";
   return p.isDefault ? "do" : "skip";
+}
+
+/**
+ * Redaction (src/redact.ts): off unless turned on. Asked once at a terminal, `[y/N]`, while it was
+ * never set up; the flags set it at any time; otherwise left as it is.
+ */
+export function redactDecision(o: Options, m: Mode, configured: boolean): Decision {
+  if (m.check) return "skip";
+  if (o.redact || o.redactNames) return "do";
+  return m.interactive && !configured ? "ask-no" : "skip";
 }
 
 /** Copying CC_REMOTE_SSH and friends into Orca's Claude environment. */

@@ -402,6 +402,20 @@ cc-remote 还会用一次快速的 `ssh <your-server> true` 检查共享连接�
 （`ssh -O stop`），新的会话会建立新的连接，而不是一直卡到 keepalive 放弃。同时发起的版本探测（Orca 每个
 新聊天会发两次）共用一次 ssh。
 
+**脱敏。** 默认关闭；`cc-remote setup` 会问一次，`cc-remote setup --redact on|off` 随时可以改。开启后，
+cc-remote 发往服务器的所有内容里，本机的主机名（短名和完整域名）、IP、你的用户名（连带 home 目录路径）和机器 ID 都会被换成
+`ccr-host-1a2b3c4d` 这样的占位符：包括 claude 的消息流（你的提问、工具结果、提示里的环境信息和
+`CLAUDE.md`）、远程命令、上传的 transcript 和项目文件、Monitor 的输出，以及访问服务器端文件的工具。
+回来的内容会还原，所以工具执行和 Orca 显示的都是真实值，而服务器上的 claude、它的 transcript 和模型只看到
+占位符。用 `--redact-names`（或 `~/.config/cc-remote/redact.json` 里的 `names`）可以再加名字：内部域名
+（`corp.example.com` 也覆盖它的子域名）、其他主机、IP、项目代号。占位符是一个 HMAC，密钥只存在本机的
+`~/.config/cc-remote/` 里，所以每个会话都一样，恢复的聊天也能读回来。服务器上的工作目录名同样用占位符，
+claude 拿不到服务器端那几个含你 IP 的 ssh 变量，setup 写到服务器的机器标记和 ssh 密钥注释也用占位符。
+时区、时间戳和 locale 保持原样。匹配不区分大小写，并且只在词的边界处匹配；短于三个字符的值（比如两个字母的
+用户名）不会替换，`cc-remote doctor` 会列出来。设置开着但文件不可用时，会话不会启动。关掉之后，之前的
+占位符仍会还原。这是尽力而为的过滤，不是安全边界：图片等二进制数据、编码过的形式（base64、URL 编码）、
+没告诉它的名字，以及模型从上下文推断出来的信息，都会原样通过。
+
 **Windows。** shell 工具是 PowerShell 而不是 Bash，和 Windows 上的 Claude Code 一致。PATH 里有
 PowerShell 7（`pwsh`）时用它，否则用 Windows PowerShell 5.1。Grep 需要 PATH 里有
 [ripgrep](https://github.com/BurntSushi/ripgrep)（`rg`）。在服务器上，像 `C:\Users\me\app` 这样的本地目录
@@ -430,6 +444,8 @@ PowerShell 7（`pwsh`）时用它，否则用 Windows PowerShell 5.1。Grep 需�
   并提示改用后台 Bash。WebSocket 监视收到含多行的文本帧时，会作为一行送到 Claude，换行写成 `\n`；
   服务器落后超过 1 MiB 时，新的帧会被丢弃，并用一行说明丢了多少。
   开着 Monitor 的会话里，比 cc-remote 新的内置工具不会出现（见"Monitor"一节）。
+- 脱敏不处理二进制数据、编码过的形式和没列出的名字；服务器上已经装好的、注释里写着本机名字的 ssh 密钥
+  不会改（见"脱敏"一节）。
 - 重连需要服务器上有 `python3` 3.6 或更高版本。链路断开期间 claude 写到 stderr 的内容会被保留（最多
   1 MiB），但断开那一刻正在传输的部分可能丢失；会话的数据流本身不会丢。如果服务器的 systemd-logind 会在
   ssh 会话结束时杀掉该用户的进程（`KillUserProcesses=yes`），claude 就无法在连接断开后继续运行。

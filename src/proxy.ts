@@ -9,6 +9,7 @@ import type { Approval, Monitors } from "./monitor";
 import { EDITS, LOCAL, PREFIX, strip } from "./names";
 import { SHELL } from "./platform";
 import { HOOK_ID, MONITOR, policyHook, shellVerdict, withPolicyHook, workspaceEdit } from "./policy";
+import { redaction } from "./redact";
 import { type Destination, persistAllowRule, type ShellTool, TrackedSettingsError, type Verdict } from "./rules";
 import { mirrorKey, projectKey, projectsDir, writeMirror } from "./sessions";
 import type { Workspace } from "./tools/util";
@@ -268,13 +269,17 @@ function lines(input: Readable, onLine: (line: string) => void, onEnd: () => voi
 
 /**
  * Wraps the ssh process so the SDK reads and writes through the rewriter, and through `layer`
- * when given one; the layer gets the function that writes to claude.
+ * when given one; the layer gets the function that writes to claude. Under redaction (redact.ts)
+ * the stream is filtered at the wire: every line to claude has this machine's values replaced,
+ * every line from it has the placeholders restored before anything here reads it.
  */
 export function proxy(child: ChildProcess, s: Session, layer?: (toClaude: (line: string) => void) => Layer): SpawnedProcess {
   const { outbound, inbound } = rewriter(s);
+  const r = redaction();
+  const restore = r.stream();
   const stdin = new PassThrough();
   const stdout = new PassThrough();
-  const toClaude = (line: string) => { if (child.stdin!.writable) child.stdin!.write(`${line}\n`); };
+  const toClaude = (line: string) => { if (child.stdin!.writable) child.stdin!.write(`${r.jsonLine(line)}\n`); };
   const extra = layer?.(toClaude);
   // claude going away shows up as the exit event; a write racing it must not crash us.
   child.stdin!.on("error", () => {});
@@ -282,10 +287,12 @@ export function proxy(child: ChildProcess, s: Session, layer?: (toClaude: (line:
     const out = extra ? extra.inbound(inbound(line)) : inbound(line);
     if (out !== null) toClaude(out);
   }, () => child.stdin!.end());
-  lines(child.stdout!, (line) => {
-    let out = outbound(line, toClaude);
-    if (out !== null && extra) out = extra.outbound(out);
-    if (out !== null) stdout.write(`${out}\n`);
+  lines(child.stdout!, (wire) => {
+    for (const line of restore(wire)) {
+      let out = outbound(line, toClaude);
+      if (out !== null && extra) out = extra.outbound(out);
+      if (out !== null) stdout.write(`${out}\n`);
+    }
   }, () => stdout.end());
 
   return {

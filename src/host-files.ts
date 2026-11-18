@@ -19,7 +19,7 @@ import { archive, type TarFile } from "./tar";
  */
 export type Need =
   | { kind: "plugin"; local: string; remote: string }
-  | { kind: "transcript"; local: string; sessionId: string }
+  | { kind: "transcript"; local: string; sessionId: string; filter?: (data: Uint8Array) => Uint8Array }
   | { kind: "project"; files: ClaudeFile[]; stamp: string }
   | { kind: "relay"; remote: string; data: Uint8Array };
 
@@ -174,8 +174,12 @@ export function bundle(needs: Need[], missing: number[]): Uint8Array {
     }
     const info = statSync(need.local);
     if (info.isDirectory()) walk(need.local, `${i}`, files);
-    // A transcript is private, as claude keeps it.
-    else files.push({ path: `${i}`, data: readFileSync(need.local), mode: need.kind === "transcript" ? 0o600 : mode(info.mode), mtime: Math.floor(info.mtimeMs / 1000) });
+    else {
+      const data = readFileSync(need.local);
+      // A transcript is private, as claude keeps it; under redaction it goes with placeholders.
+      const transcript = need.kind === "transcript";
+      files.push({ path: `${i}`, data: transcript && need.filter ? need.filter(data) : data, mode: transcript ? 0o600 : mode(info.mode), mtime: Math.floor(info.mtimeMs / 1000) });
+    }
   }
   return archive(files);
 }

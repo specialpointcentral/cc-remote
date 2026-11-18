@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HostFiles } from "../src/host-fs";
 import { policyHook } from "../src/policy";
+import { Redactor, resetRedaction } from "../src/redact";
 import { rewriter } from "../src/proxy";
 import { settingsLocations } from "../src/rules";
 import { keyFor } from "../src/sessions";
@@ -45,6 +46,33 @@ afterAll(() => {
 
 /** The host folder of a local project, as the check reports it. */
 const folder = (cwd: string) => join(host.home, hostDir(cwd));
+
+describe("under redaction", () => {
+  // This machine is "laptop" with the user "alice"; so is the host's user. The host's folders have
+  // placeholders in their names, which the model sees restored.
+  const r = new Redactor(new Uint8Array(32).fill(3), [{ kind: "host", text: "laptop" }, { kind: "user", text: "alice" }], { on: true });
+  const local = "/home/alice/work/app";
+  const hostFolder = `/home/alice/${r.text(`.cc-remote/ws/laptop${local}`)}`;
+  beforeAll(() => resetRedaction(r));
+  afterAll(() => resetRedaction());
+
+  test("a path the model gives, as it sees it, names the host's own file as the host has it", () => {
+    const files = new HostFiles("box", { home: "/home/alice", config: "/home/alice/.claude", folder: hostFolder });
+    const key = keyFor(hostFolder);
+    expect(key).not.toContain("laptop");
+    // The host's home keeps its user name, the same as this machine's.
+    expect(files.own("/home/alice/.claude/plans/a-plan.md")).toBe("/home/alice/.claude/plans/a-plan.md");
+    expect(files.own("~/.claude/plans/a.md")).toBe("/home/alice/.claude/plans/a.md");
+    // The project folder's name, restored, maps back; so does a name in the rest of the path.
+    const seen = r.restore(key);
+    expect(seen).toContain("laptop");
+    expect(files.own(`/home/alice/.claude/projects/${seen}/memory/laptop-notes.md`)).toBe(`/home/alice/.claude/projects/${key}/memory/${r.text("laptop")}-notes.md`);
+    expect(files.selfEdited(`/home/alice/.claude/projects/${seen}/memory/MEMORY.md`)).toBe("memory");
+    expect(files.own(`/tmp/claude-1000/${seen}/s1/tasks/a.output`)).toBe(`/tmp/claude-1000/${key}/s1/tasks/a.output`);
+    // The local project is not the host's.
+    expect(files.own(`${local}/x.md`)).toBeUndefined();
+  });
+});
 
 describe("which files are the host's", () => {
   const where = { home: "/home/u", config: "/home/u/.claude", folder: "/home/u/.cc-remote/ws/laptop/work/app" };

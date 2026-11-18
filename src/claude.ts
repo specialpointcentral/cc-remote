@@ -8,6 +8,7 @@ import type { HostProcess } from "./host-process";
 import { localMcpServers } from "./mcp";
 import { environment } from "./prompt";
 import { proxy } from "./proxy";
+import { redaction } from "./redact";
 import { argument, asChild, hostDir, hostVersion, launch, runRemote, tellTools } from "./ssh";
 import { localTools } from "./tools";
 import { workspace } from "./tools/util";
@@ -86,9 +87,17 @@ export async function claudeCompat(host: string, argv: string[]): Promise<void> 
   if (!stream) {
     // A one-off `-p`, such as a title: no SDK on the other end, so no local tools either.
     const child = launch(host, cwd, plan.args, env, plan.uploads);
-    process.stdin.pipe(child.stdin!);
-    child.stdout!.pipe(process.stdout);
-    return exitWith(child, child.stdout!);
+    const r = redaction();
+    if (!r.active) {
+      process.stdin.pipe(child.stdin!);
+      child.stdout!.pipe(process.stdout);
+      return exitWith(child, child.stdout!);
+    }
+    // Under redaction the prompt goes with placeholders and the answer comes back restored.
+    process.stdin.pipe(r.transform("redact")).pipe(child.stdin!);
+    const out = child.stdout!.pipe(r.transform("restore"));
+    out.pipe(process.stdout);
+    return exitWith(child, out);
   }
 
   const [prompt, local] = await Promise.all([environment(cwd, plan.addDirs), plan.strictMcpConfig ? {} : localMcpServers(cwd)]);

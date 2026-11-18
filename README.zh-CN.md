@@ -307,7 +307,8 @@ Glob 会通过同一条 ssh 连接在服务器上读写这些文件，所以 pla
 
 **Monitor。** Claude 的 Monitor 工具监视的是你的机器。监视启动的命令在本机运行，方式和 Bash 命令一样：
 用你的登录 shell 环境，在 shell 当前所在的目录里运行。它打印的每一行都作为一个事件送到 Claude，和
-Claude Code 自己的 Monitor 一样；命令退出时监视结束。WebSocket 监视（`ws`）也在本机打开。工具本身仍由
+Claude Code 自己的 Monitor 一样；命令退出时监视结束，它留在后台的进程也会被停止。
+WebSocket 监视（`ws`）也在本机打开。工具本身仍由
 服务器上的 claude 运行，超时和停止按钮都照旧：运行之前，cc-remote 把这次调用改写成中继的一条命令
 `"$CC_REMOTE_PYTHON" -S "$CC_REMOTE_RELAY" monitor <令牌> '<原命令>'`，由它让你的机器执行原命令并把
 输出传回。auto 模式的分类器和 claude 的任务列表看到的就是这个形式。权限上，这条命令和 Bash 命令待遇
@@ -426,7 +427,8 @@ PowerShell 7（`pwsh`）时用它，否则用 Windows PowerShell 5.1。Grep 需�
 - 从客户端桥接的 MCP 服务器只暴露工具，不暴露 resources 和 prompts。
 - LSP 和 worktree 相关工具已关闭。Monitor 在 Windows 上、一次性的 `claude -p` 里以及关闭重连
   （`CC_REMOTE_RECONNECT_GRACE=0`）时也会关闭；服务器上没有 python3 3.6 或更高版本时，它会拒绝运行，
-  并提示改用后台 Bash。WebSocket 监视收到含多行的文本帧时，会作为一行送到 Claude，换行写成 `\n`。
+  并提示改用后台 Bash。WebSocket 监视收到含多行的文本帧时，会作为一行送到 Claude，换行写成 `\n`；
+  服务器落后超过 1 MiB 时，新的帧会被丢弃，并用一行说明丢了多少。
   开着 Monitor 的会话里，比 cc-remote 新的内置工具不会出现（见"Monitor"一节）。
 - 重连需要服务器上有 `python3` 3.6 或更高版本。链路断开期间 claude 写到 stderr 的内容会被保留（最多
   1 MiB），但断开那一刻正在传输的部分可能丢失；会话的数据流本身不会丢。如果服务器的 systemd-logind 会在

@@ -5,7 +5,7 @@ import { SHELL, WINDOWS } from "./platform";
 import { refusal, type ShellTool } from "./rules";
 import { quote } from "./sh";
 import { loginLaunch } from "./tools/login";
-import { groups, stop } from "./tools/shell";
+import { groups, stop, stopLeftovers } from "./tools/shell";
 import type { Workspace } from "./tools/util";
 
 /** Monitor's input, as claude's own tool takes it. */
@@ -64,11 +64,13 @@ const encode = (text: string) => new TextEncoder().encode(text);
  * directory the session's shell is in, and its stdout and stderr go back to the monitor process,
  * whose stdout lines are claude's events; when it exits, the monitor process exits with its status.
  * When the monitor process goes (claude stopped the watch, or its time ran out), the command is
- * stopped here, its whole process group. A WebSocket watch (`ws`) is opened here too: each text
- * frame is a line, newlines escaped.
+ * stopped here, its whole process group; when the command exits by itself, whatever it left
+ * running in the background is stopped too, as nothing would read its output any more. A
+ * WebSocket watch (`ws`) is opened here too: each text frame is a line, newlines escaped.
  *
  * Output waits here while the link is down, and reading pauses, which pauses the command, while
- * the host is behind by more than MAX_PENDING.
+ * the host is behind by more than MAX_PENDING. A WebSocket can't be paused: its frames are
+ * dropped meanwhile, and a line says how many.
  */
 export class Monitors implements Watcher {
   private approvals = new Map<string, Approval>();
@@ -159,14 +161,16 @@ export class Monitors implements Watcher {
       groups.add(proc.pid);
       const piping = Promise.all([this.pipe(id, r, proc.stdout, true), this.pipe(id, r, proc.stderr, false)]);
       await proc.exited;
-      groups.delete(proc.pid);
       // A child left in the background (`cmd &`) can hold the pipes open after the shell exits. It
       // gets DRAIN_MS; reading paused for the host doesn't count, or the last output would be lost.
+      // Then it is stopped: its output would go nowhere, and nothing could stop it later.
       for (;;) {
         const drained = await Promise.race([piping.then(() => true), Bun.sleep(DRAIN_MS).then(() => false)]);
         if (drained || r.stopped || !r.resume) break;
       }
       for (const reader of r.readers.splice(0)) void reader.cancel().catch(() => {});
+      if (!r.stopped) stopLeftovers(proc.pid);
+      groups.delete(proc.pid);
       const never = launch.done?.() === true;
       if (r.stopped) return;
       if (never && attempt === 0) continue;
@@ -205,13 +209,22 @@ export class Monitors implements Watcher {
     this.running.set(id, r);
     socket.binaryType = "arraybuffer";
     const line = (text: string) => this.link.output(id, encode(`${text}\n`));
+    // Frames dropped while the host was behind, said once it catches up, or at the end.
+    let dropped = 0;
+    const tell = () => {
+      if (dropped) line(`[cc-remote: ${dropped} frame${dropped === 1 ? "" : "s"} dropped while the host was behind]`);
+      dropped = 0;
+    };
     socket.addEventListener("message", (e) => {
       if (r.stopped) return;
+      if (this.link.pending(id) > MAX_PENDING) return void dropped++;
+      tell();
       if (typeof e.data === "string") line(e.data.replace(/\r?\n/g, "\\n"));
       else line(`[binary frame, ${(e.data as ArrayBuffer).byteLength} bytes]`);
     });
     socket.addEventListener("close", (e) => {
       if (r.stopped) return;
+      tell();
       this.running.delete(id);
       const clean = e.code === 1000 || e.code === 1005;
       if (!clean) this.link.stderr(id, encode(`cc-remote: ${spec.url} closed: ${e.code}${e.reason ? ` ${e.reason}` : ""}\n`));

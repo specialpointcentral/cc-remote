@@ -39,6 +39,20 @@ export function stop(pid: number) {
 }
 
 /**
+ * Stops what is left of a group whose first process has exited: children it left in the
+ * background. Nothing on Windows, where the tree is found through that first process.
+ */
+export function stopLeftovers(pid: number) {
+  if (WINDOWS) return;
+  try {
+    process.kill(-pid, 0);
+  } catch {
+    return; // Nothing left.
+  }
+  stop(pid);
+}
+
+/**
  * Runs as cc-remote exits, when no timer will fire any more: SIGTERM now, and a detached sh, which
  * outlives us, sends the SIGKILLs after the grace period.
  */

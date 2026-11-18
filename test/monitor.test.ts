@@ -145,6 +145,20 @@ describe("Monitors", () => {
     expect(k.ends.has(1)).toBe(false);
   }, 20_000);
 
+  test("a command that exits stops what it left in the background, holding its output or not", async () => {
+    const { monitors, k, root, token } = setup();
+    const pids = join(root, "pids");
+    monitors.start(1, token(monitors.approve({ command: `sleep 30 & echo $! > ${pids}; sleep 30 >/dev/null 2>&1 & echo $! >> ${pids}; echo up` })));
+    await until(() => k.ends.has(1));
+    expect(k.out.get(1)).toBe("up\n");
+    expect(k.ends.get(1)).toBe(0);
+    const children = readFileSync(pids, "utf8").trim().split("\n").map(Number);
+    expect(children).toHaveLength(2);
+    await until(() => children.every((c) => !alive(c)));
+    // Nothing is left for the session's end to stop.
+    monitors.closeAll();
+  }, 20_000);
+
   test("stdout waits while the host is behind, and goes on once it catches up", async () => {
     const { monitors, k, token } = setup();
     k.behind(2 << 20);
@@ -183,6 +197,40 @@ describe("Monitors", () => {
       monitors.start(2, token(monitors.approve({ ws: { url: "not a url" } })));
       await until(() => k.ends.has(2));
       expect(k.ends.get(2)).toBe(1);
+    } finally {
+      server.stop(true);
+    }
+  }, 20_000);
+
+  test("a WebSocket watch drops frames while the host is behind, and says how many", async () => {
+    let peer: { send(message: string): unknown; close(code?: number): void } | undefined;
+    const server = Bun.serve({
+      port: 0,
+      fetch: (req, srv) => (srv.upgrade(req) ? undefined : new Response("no", { status: 400 })),
+      websocket: { open: (ws) => void (peer = ws), message() {} },
+    });
+    try {
+      const { monitors, k, token } = setup();
+      k.behind(2 << 20);
+      monitors.start(1, token(monitors.approve({ ws: { url: `ws://127.0.0.1:${server.port}/` } })));
+      await until(() => peer !== undefined);
+      peer!.send("one");
+      peer!.send("two");
+      await Bun.sleep(300);
+      expect(k.out.get(1)).toBeUndefined();
+      k.behind(0);
+      peer!.send("three");
+      await until(() => (k.out.get(1) ?? "").includes("three"));
+      // Dropped just before the end: said at the end.
+      k.behind(2 << 20);
+      peer!.send("four");
+      await Bun.sleep(300);
+      peer!.close(1000);
+      await until(() => k.ends.has(1));
+      expect(k.out.get(1)).toBe(
+        "[cc-remote: 2 frames dropped while the host was behind]\nthree\n[cc-remote: 1 frame dropped while the host was behind]\n",
+      );
+      expect(k.ends.get(1)).toBe(0);
     } finally {
       server.stop(true);
     }

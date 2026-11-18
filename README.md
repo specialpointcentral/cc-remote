@@ -355,7 +355,8 @@ shell instead. A command that times out or is stopped gets SIGTERM, and SIGKILL 
 **Monitor.** Claude's Monitor tool watches your machine. The command a watch starts runs here, the
 way a Bash command does: in your login shell's environment, in the directory the shell is in. Each
 line it prints reaches Claude as an event, as with Claude Code's own Monitor, and its exit ends the
-watch. A WebSocket watch (`ws`) is opened here too. claude on the server still runs the tool, with
+watch, and stops what it left running in the background. A WebSocket watch (`ws`) is opened
+here too. claude on the server still runs the tool, with
 its timeout and its stop button: before it runs, cc-remote rewrites the call into a command of its
 relay, `"$CC_REMOTE_PYTHON" -S "$CC_REMOTE_RELAY" monitor <token> '<the command>'`, which has your
 machine run the command and passes its output back. That form is what auto mode's classifier and
@@ -501,8 +502,9 @@ like `C:\Users\me\app` gets the working folder `~/.cc-remote/ws/<your hostname>/
 - LSP and the worktree tools are turned off. So is Monitor on Windows, in one-off `claude -p` runs and
   with reconnection off (`CC_REMOTE_RECONNECT_GRACE=0`). On a server without python3 3.6 or later it
   refuses, saying to use Bash in the background instead. A WebSocket watch's text frame with several
-  lines reaches Claude as one line, its line breaks written `\n`. Where Monitor is on, a built-in tool
-  newer than cc-remote isn't offered (see [Monitor](#behavior)).
+  lines reaches Claude as one line, its line breaks written `\n`, and while the server is more than
+  1 MiB behind, its frames are dropped, with a line saying how many. Where Monitor is on, a built-in
+  tool newer than cc-remote isn't offered (see [Monitor](#behavior)).
 - Reconnection needs `python3` 3.6 or later on the server. What claude writes to stderr while the
   link is down is kept (up to 1 MiB) but can be lost if it was in flight when the link dropped; the
   session's stream never is. On a server whose systemd-logind kills a user's processes when their ssh

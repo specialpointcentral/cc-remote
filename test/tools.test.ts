@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { snapshots } from "../src/tools/login";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -118,6 +118,19 @@ describe("Glob", () => {
         expect((await call(glob, { pattern: "*.nothing", path: root })).text).toBe("No files found");
       } finally {
         bins.rg = saved;
+      }
+    });
+    test(`${name}: a folder reached through a link lists the same files, shown through the link`, async () => {
+      const saved = bins.rg;
+      bins.rg = rg;
+      const link = join(dir, `globbed-link-${name}`);
+      symlinkSync(root, link);
+      try {
+        expect((await call(glob, { pattern: "*.ts", path: link })).text).toBe(join(link, "top.ts"));
+        expect((await call(glob, { pattern: "a/*.ts", path: link })).text).toBe(join(link, "a/x.ts"));
+      } finally {
+        bins.rg = saved;
+        rmSync(link);
       }
     });
   }
@@ -246,6 +259,24 @@ describe("Glob and Grep", () => {
     expect((await call(grep, { pattern: "needle", path, "-i": true, output_mode: "count" })).text.split("\n").sort()).toEqual([`${dir}/g/new.ts:1`, `${dir}/g/old.ts:1`]);
     expect((await call(grep, { pattern: "NEEDLE", path, output_mode: "content" })).text).toBe(`${dir}/g/new.ts:1:const NEEDLE = 2;`);
     expect((await call(grep, { pattern: "absent", path })).text).toBe("No files found");
+  });
+  test("through a link: the same matches, shown through the link, and a glob with a folder in it works", async () => {
+    const link = join(dir, "g-link");
+    symlinkSync(join(dir, "g"), link);
+    try {
+      expect((await call(grep, { pattern: "needle", path: link })).text).toBe(`Found 1 file\n${link}/old.ts`);
+      expect((await call(grep, { pattern: "NEEDLE", path: link, output_mode: "content" })).text).toBe(`${link}/new.ts:1:const NEEDLE = 2;`);
+      // A single file's lines carry no path.
+      expect((await call(grep, { pattern: "NEEDLE", path: join(link, "new.ts"), output_mode: "content" })).text).toBe("1:const NEEDLE = 2;");
+      // grep's --include matches only names; ripgrep anchors a glob with a folder at the directory searched.
+      if (bins.rg) {
+        await Bun.write(join(dir, "g/sub/deep.ts"), "needle\n");
+        expect((await call(grep, { pattern: "needle", path: link, glob: "sub/*.ts" })).text).toBe(`Found 1 file\n${link}/sub/deep.ts`);
+      }
+    } finally {
+      rmSync(link);
+      rmSync(join(dir, "g/sub"), { recursive: true, force: true });
+    }
   });
 });
 

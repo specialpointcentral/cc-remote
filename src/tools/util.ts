@@ -1,5 +1,6 @@
+import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
-import { isAbsolute, resolve } from "node:path";
+import { isAbsolute, resolve, sep } from "node:path";
 import type { HostFiles } from "../host-fs";
 import type { Monitors } from "../monitor";
 
@@ -24,6 +25,25 @@ export const err = (text: string) => ({ ...ok(text), isError: true });
 
 /** ripgrep and grep, when installed. Fields, so tests can take ripgrep away. */
 export const bins = { rg: Bun.which("rg"), grep: Bun.which("grep") };
+
+/**
+ * A path to search, as ripgrep needs it, and how to put back what it prints. ripgrep matches a
+ * glob against paths relative to its working directory, which it knows with links resolved: a
+ * path reached through a link (macOS's /tmp, say) lies outside it, and a glob that is anchored
+ * there, as Glob's all are, matches nothing. So ripgrep gets the path resolved, and `shown` gives
+ * what it prints the path the model named back.
+ */
+export function forRipgrep(path: string): { real: string; shown: (line: string) => string } {
+  const named = resolve(path);
+  let real = named;
+  try {
+    real = realpathSync(named);
+  } catch {
+    // Missing: ripgrep says so.
+  }
+  if (real === named) return { real, shown: (line) => line };
+  return { real, shown: (line) => (line === real || line.startsWith(real + sep) ? named + line.slice(real.length) : line) };
+}
 
 /**
  * The lines of a stream as they arrive, each cut to its first `keep` characters, without the

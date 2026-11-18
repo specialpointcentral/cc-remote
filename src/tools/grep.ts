@@ -2,7 +2,7 @@ import { tool } from "@anthropic-ai/claude-agent-sdk";
 import { statSync } from "node:fs";
 import { dirname } from "node:path";
 import { z } from "zod";
-import { abs, bins, err, head, ok, streamLines, type Workspace } from "./util";
+import { abs, bins, err, forRipgrep, head, ok, streamLines, type Workspace } from "./util";
 
 /** Claude Code's Grep shows this many results unless told otherwise. */
 const HEAD_LIMIT = 250;
@@ -66,14 +66,19 @@ export const grep = (ws: Workspace) => tool(
     const skip = Math.max(0, input.offset ?? 0);
     const path = abs(ws, input.path ?? ".");
     // ripgrep reads a glob relative to its working directory: the directory searched, or the file's.
-    let cwd = path;
-    try { if (!statSync(path).isDirectory()) cwd = dirname(path); } catch { cwd = ws.root; }
-    const proc = Bun.spawn(command(input, mode, path), { cwd, stdout: "pipe", stderr: "pipe", stdin: "ignore" });
+    const target = forRipgrep(path);
+    let cwd = target.real;
+    let file = false;
+    try { if (!statSync(target.real).isDirectory()) { cwd = dirname(target.real); file = true; } } catch { cwd = ws.root; }
+    const proc = Bun.spawn(command(input, mode, target.real), { cwd, stdout: "pipe", stderr: "pipe", stdin: "ignore" });
+    // Each line starts with the file's path, except a single file's own lines.
+    const named = file && mode === "content" ? (line: string) => line : target.shown;
     // Errors are kept short, and the search stops once it has found what will be shown.
     const errors = head(proc.stderr);
     const lines: string[] = [];
     let seen = 0, chars = 0, more = false;
-    for await (const line of streamLines(proc.stdout, MAX_CHARS)) {
+    for await (const raw of streamLines(proc.stdout, MAX_CHARS)) {
+      const line = named(raw);
       if (!line || (mode === "count" && line.endsWith(":0"))) continue;
       if (++seen <= skip) continue;
       if (lines.length >= limit || chars + line.length > MAX_CHARS) { more = true; break; }

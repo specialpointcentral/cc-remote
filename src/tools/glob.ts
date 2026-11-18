@@ -3,7 +3,7 @@ import { statSync } from "node:fs";
 import { isAbsolute, join, posix } from "node:path";
 import { z } from "zod";
 import type { HostFiles } from "../host-fs";
-import { abs, bins, err, head, ok, streamLines, type Workspace } from "./util";
+import { abs, bins, err, forRipgrep, head, ok, streamLines, type Workspace } from "./util";
 
 const LIMIT = 100;
 const SKIP = /(^|[\\/])(\.git|node_modules)[\\/]/;
@@ -45,13 +45,14 @@ function newest(limit: number) {
  */
 async function rgFiles(glob: string, cwd: string, skip: boolean, add: (file: string) => void): Promise<string | undefined> {
   // ripgrep reads globs relative to its working directory, whatever path it searches.
-  const proc = Bun.spawn([bins.rg!, "--files", "--hidden", "--glob", glob, ...(skip ? ["--glob", "!.git", "--glob", "!node_modules"] : []), "--", cwd], {
-    cwd, stdout: "pipe", stderr: "pipe", stdin: "ignore",
+  const { real, shown } = forRipgrep(cwd);
+  const proc = Bun.spawn([bins.rg!, "--files", "--hidden", "--glob", glob, ...(skip ? ["--glob", "!.git", "--glob", "!node_modules"] : []), "--", real], {
+    cwd: real, stdout: "pipe", stderr: "pipe", stdin: "ignore",
   });
   const errors = head(proc.stderr);
   let found = false;
   for await (const line of streamLines(proc.stdout)) {
-    if (line) { found = true; add(line); }
+    if (line) { found = true; add(shown(line)); }
   }
   const code = await proc.exited;
   return code > 1 && !found ? ((await errors).trim() || `rg failed with exit code ${code}`) : undefined;

@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { withEntry } from "../src/setup/actions/ssh";
 import {
-  commandDecision, envDecision, hostFileDecision, hostKeyDecision, installDecision, type Mode, type Options, parseArgs, permissionDecision, sshKeyDecision,
+  commandDecision, envDecision, hostFileDecision, hostKeyDecision, installDecision, type Mode, type Options, parseArgs, permissionDecision, redactDecision, sshKeyDecision,
   UsageError,
 } from "../src/setup/args";
 import { remoteChecks } from "../src/setup/checks/remote";
@@ -86,6 +86,16 @@ describe("flags and consent", () => {
     expect(sshKeyDecision(opts(["--ssh-key", "skip"]), TTY)).toBe("skip");
     expect(envDecision(opts(), BATCH)).toBe("skip");
     expect(envDecision(opts(["--orca-env"]), BATCH)).toBe("do");
+    // Redaction: asked once at a terminal, [y/N]; flags set it; unattended it stays as it is.
+    expect(redactDecision(opts(), TTY, false)).toBe("ask-no");
+    expect(redactDecision(opts(), TTY, true)).toBe("skip");
+    expect(redactDecision(opts(), BATCH, false)).toBe("skip");
+    expect(redactDecision(opts(["--redact", "on"]), BATCH, true)).toBe("do");
+    expect(redactDecision(opts(["--redact-names", "a.example,b c"]), TTY, true)).toBe("do");
+    expect(redactDecision(opts(), CHECK, false)).toBe("skip");
+    expect(opts(["--redact-names", " a.example , ,b c"]).redactNames).toEqual(["a.example", "b c"]);
+    expect(() => opts(["--redact", "maybe"])).toThrow("--redact takes on, off");
+    expect(() => opts(["--check", "--redact", "on"])).toThrow("can't be combined with --redact");
   });
 });
 

@@ -3,18 +3,27 @@ import { runPlan } from "../actions/local";
 import { localChecks } from "../checks/local";
 import type { Ctx } from "../context";
 import { installPlan, mergePlans } from "../os";
+import { redactCheck, setupRedaction } from "../redact";
 import { endStep, replaceCheck, show } from "../report";
 import { t } from "../ui/i18n";
 
 /**
  * Step 1, this machine. A missing tool gets its exact install command; at a terminal setup asks
  * `[y/N]` before running it, unattended it runs only with `--install` (`sudo -n`), and `--check`
- * only shows it.
+ * only shows it. Then redaction: asked once at a terminal while it was never set up.
  */
 export async function stepLocal(ctx: Ctx): Promise<{ isSsh: boolean }> {
   const label = ctx.mode.check ? t("This machine", "本机") : t("Checking this machine", "检查本机");
   ctx.progress.begin(label);
   const local = await localChecks(ctx);
+  const redact = redactCheck(ctx);
+  local.checks.push(redact);
+  const result = await tools(ctx, local, label);
+  await setupRedaction(ctx, redact);
+  return result;
+}
+
+async function tools(ctx: Ctx, local: Awaited<ReturnType<typeof localChecks>>, label: string): Promise<{ isSsh: boolean }> {
   const plans = mergePlans(local.missing.map((p) => installPlan(p, local.machine, !ctx.mode.interactive))).filter((p) => p.steps.length);
   const decision = installDecision(ctx.o, ctx.mode);
   if (decision === "skip" && !ctx.mode.check && plans.length) {

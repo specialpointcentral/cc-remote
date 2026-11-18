@@ -474,6 +474,26 @@ taking new sessions (`ssh -O stop`), and new sessions open a fresh connection in
 the keepalives give up. Version probes that start together (Orca makes two for each new chat) share
 one ssh.
 
+**Redaction.** Off by default; `cc-remote setup` asks once, and `cc-remote setup --redact on|off`
+changes it. When it's on, this machine's host name (short and fully qualified), its addresses, your
+user name (and with it your home folder's path) and its machine id are replaced with placeholders such as `ccr-host-1a2b3c4d`
+in everything cc-remote sends to the server: claude's stream (your prompts, tool results, the
+environment and `CLAUDE.md` in the prompt), the remote command, uploaded transcripts and project
+files, Monitor output and the server-side file tools. Whatever comes back has them restored, so the
+tools run, and Orca shows, the real values, while claude on the server, its transcripts and the model
+see only placeholders. `--redact-names` (or `names` in `~/.config/cc-remote/redact.json`) adds more:
+internal domains (`corp.example.com` also covers its subdomains), other hosts, addresses, code
+names. A placeholder is an HMAC under a key that stays in `~/.config/cc-remote/`, so it's the same in
+every session and a resumed chat reads back. The working folder on the server is named with
+placeholders too, the server-side ssh variables holding your address are unset for claude, and
+setup names this machine's marker and ssh key after the placeholder. Time zones, timestamps and
+locale are left as they are. Matching ignores case and stops at word edges; values shorter than three
+characters (a two-letter user name) are left alone, and `cc-remote doctor` says which. If the
+settings are on but unusable, sessions don't start. Turning it off again keeps restoring earlier
+placeholders. This is a best-effort filter, not a security boundary: images and other binary data,
+encoded forms (base64, URL encoding), names it wasn't given and what the model infers from the rest
+pass through.
+
 **Windows.** The shell tool is PowerShell instead of Bash, as in Claude Code on Windows. cc-remote
 uses PowerShell 7 (`pwsh`) when it's on PATH, otherwise Windows PowerShell 5.1. Grep needs
 [ripgrep](https://github.com/BurntSushi/ripgrep) (`rg`) on PATH. On the server, a local directory
@@ -505,6 +525,8 @@ like `C:\Users\me\app` gets the working folder `~/.cc-remote/ws/<your hostname>/
   lines reaches Claude as one line, its line breaks written `\n`, and while the server is more than
   1 MiB behind, its frames are dropped, with a line saying how many. Where Monitor is on, a built-in
   tool newer than cc-remote isn't offered (see [Monitor](#behavior)).
+- Redaction leaves binary data, encoded forms and unlisted names alone, and ssh keys that already
+  name this machine on the server keep their comments (see [Redaction](#behavior)).
 - Reconnection needs `python3` 3.6 or later on the server. What claude writes to stderr while the
   link is down is kept (up to 1 MiB) but can be lost if it was in flight when the link dropped; the
   session's stream never is. On a server whose systemd-logind kills a user's processes when their ssh

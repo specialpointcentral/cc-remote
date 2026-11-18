@@ -1,8 +1,8 @@
 import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, statSync } from "node:fs";
-import { hostname } from "node:os";
 import { join } from "node:path";
 import type { Ctx } from "../context";
 import { writePrivate } from "../files";
+import { machineLabel } from "../redact";
 
 /**
  * Local ssh changes setup may make, each with consent: a passphrase-less key for cc-remote
@@ -97,7 +97,9 @@ export function chooseKey(home: string): { path: string; exists: boolean; standa
 /** Makes a passphrase-less ed25519 key. */
 export async function keygen(ctx: Ctx, path: string): Promise<boolean> {
   mkdirSync(join(ctx.home, ".ssh"), { recursive: true, mode: 0o700 });
-  const r = await ctx.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", `cc-remote@${hostname()}`, "-f", path], { timeoutMs: 30_000 });
+  // The comment goes into the server's authorized_keys: under redaction, the host name's placeholder.
+  const label = machineLabel(ctx);
+  const r = await ctx.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", label ? `cc-remote@${label}` : "cc-remote", "-f", path], { timeoutMs: 30_000 });
   if (r.code !== 0) ctx.term.line(`    ${r.stderr.trim()}`);
   return r.code === 0 && existsSync(path);
 }

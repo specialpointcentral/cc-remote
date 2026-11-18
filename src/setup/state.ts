@@ -7,7 +7,7 @@ import { readPrivateJson, writePrivateJson } from "./files";
  * `setup --undo` can put things back. Written at the end of each run that isn't `--check`.
  */
 export type ActionId =
-  | "local.install" | "local.hostfile" | "ssh.keygen" | "ssh.config-block" | "ssh.copy-id"
+  | "local.install" | "local.hostfile" | "local.redact" | "ssh.keygen" | "ssh.config-block" | "ssh.copy-id"
   | "remote.marker" | "orca.claude-command" | "orca.permission" | "orca.env";
 
 export type Action = { id: ActionId; at: string; previous?: unknown; value?: unknown; [key: string]: unknown };

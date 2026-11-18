@@ -2,7 +2,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test
 import { copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { activate, type Fs, installed, layout } from "../src/install/layout";
+import { activate, type Fs, installed, layout, realFs } from "../src/install/layout";
 import { inUse } from "../src/update/inuse";
 import { main } from "../src/update/index";
 import { checksumFor } from "../src/update/release";
@@ -162,6 +162,58 @@ describe("cc-remote update", () => {
     expect((await update(h, ["--rollback"])).code).toBe(0);
     expect(current(h)).toBe("0.3.0");
     expect(requests.filter((p) => p.endsWith(ASSET))).toHaveLength(1);
+  });
+
+  test("an install.json that can't be written undoes the switch, for --rollback and for an update", async () => {
+    release("0.3.0");
+    const h = home(["0.2.0"]);
+    expect((await update(h)).code).toBe(0);
+    const before = readFileSync(h.l.installJson, "utf8");
+    // install.json is written to a file beside it first: a folder in its place makes that fail.
+    const block = `${h.l.installJson}.${process.pid}.tmp`;
+    mkdirSync(block);
+    try {
+      const r = await update(h, ["--rollback"]);
+      expect(r.code).toBe(1);
+      expect(r.out).toContain(`could not write ${h.l.installJson}`);
+      expect(r.out).toContain("Nothing was switched.");
+      expect(current(h)).toBe("0.3.0");
+      expect(readFileSync(h.l.installJson, "utf8")).toBe(before);
+      release("0.4.0");
+      latest = "0.4.0";
+      const u = await update(h);
+      expect(u.code).toBe(1);
+      expect(u.out).toContain("Nothing was switched.");
+      expect(current(h)).toBe("0.3.0");
+      expect(readFileSync(h.l.installJson, "utf8")).toBe(before);
+    } finally {
+      rmSync(block, { recursive: true, force: true });
+    }
+    // Once it can be written, it all works again.
+    expect((await update(h, ["--rollback"])).code).toBe(0);
+    expect(current(h)).toBe("0.2.0");
+  });
+
+  test("a switch that can be neither recorded nor undone is told as it is", async () => {
+    release("0.3.0");
+    const h = home(["0.2.0"]);
+    expect((await update(h)).code).toBe(0);
+    mkdirSync(`${h.l.installJson}.${process.pid}.tmp`);
+    let renames = 0;
+    const fs: Fs = {
+      ...realFs,
+      rename: (from, to) => {
+        if (++renames > 1) throw new Error("rename refused");
+        realFs.rename(from, to);
+      },
+    };
+    let out = "";
+    const code = await main(["--rollback"], { env: h.env, out: { write: (s: string) => (out += s) }, platform: "linux", self: { compiled: true, execPath: "/opt/cc-remote" }, fs });
+    expect(code).toBe(1);
+    expect(out).toContain(`switched to 0.2.0, but could not record it in ${h.l.installJson}`);
+    expect(out).toContain("nor switch back (rename refused)");
+    expect(out).not.toContain("Nothing was switched");
+    expect(current(h)).toBe("0.2.0");
   });
 
   test("a checksum mismatch aborts: nothing downloaded is kept, nothing switched", async () => {

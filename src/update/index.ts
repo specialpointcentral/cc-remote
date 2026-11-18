@@ -1,7 +1,7 @@
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import pkg from "../../package.json";
-import { activate, asideFiles, assetName, binary, type Fs, installed, type Layout, layout, readInstall, realFs, VERSION, writeInstall } from "../install/layout";
+import { activate, asideFiles, assetName, binary, type Fs, type Install, installed, type Layout, layout, readInstall, realFs, VERSION, writeInstall } from "../install/layout";
 import { lock, privateDir } from "../setup/files";
 import { detectLang, setLang, t } from "../setup/ui/i18n";
 import { inUse } from "./inuse";
@@ -206,10 +206,40 @@ export async function main(argv: string[], io: UpdateIo = {}): Promise<number> {
     if (o.rollback) return await rollback(l, current, info.previous, env, say, fs, now);
     return await update(l, o, current, env, say, platform, io.arch ?? process.arch, fs, now);
   } catch (e) {
-    say(t(`cc-remote update: ${(e as Error).message}. Nothing was switched.`, `cc-remote update：${(e as Error).message}。没有切换任何版本。`));
+    if (e instanceof Switched) say(`cc-remote update: ${e.message}${t(".", "。")}`);
+    else say(t(`cc-remote update: ${(e as Error).message}. Nothing was switched.`, `cc-remote update：${(e as Error).message}。没有切换任何版本。`));
     return 1;
   } finally {
     release();
+  }
+}
+
+/** The stable path was switched, but install.json couldn't say so, nor could the switch be undone. */
+class Switched extends Error {}
+
+/**
+ * Switches the stable path from `from` (none: nothing was there) to `to`, and records it in
+ * install.json. When the record can't be written the switch is undone, so that what runs and
+ * what install.json says agree, and the error is the record's; when even that fails, a Switched
+ * error says what happened.
+ */
+function switchTo(l: Layout, fs: Fs, now: number, from: string | undefined, to: string, record: Install) {
+  activate(l, to, fs, now);
+  try {
+    writeInstall(l, record);
+  } catch (e) {
+    const why = (e as Error).message;
+    try {
+      // A later stamp: on Windows the file moved aside by the switch keeps its name.
+      if (from) activate(l, from, fs, now + 1);
+      else fs.remove(l.stable);
+    } catch (undo) {
+      throw new Switched(t(
+        `switched to ${to}, but could not record it in ${l.installJson} (${why}), nor switch back (${(undo as Error).message})`,
+        `已切换到 ${to}，但无法写入 ${l.installJson}（${why}），也无法切回（${(undo as Error).message}）`,
+      ));
+    }
+    throw new Error(t(`could not write ${l.installJson}: ${why}`, `无法写入 ${l.installJson}：${why}`));
   }
 }
 
@@ -231,8 +261,8 @@ async function rollback(l: Layout, current: string | undefined, previous: string
     say(t(`cc-remote update: ${previous} doesn't run (${check.out || "no output"}). Nothing was switched.`, `cc-remote update：${previous} 无法运行（${check.out || "无输出"}）。没有切换任何版本。`));
     return 1;
   }
-  activate(l, previous, fs, now());
-  writeInstall(l, { current: previous, previous: current, installedAt: new Date(now()).toISOString() });
+  const at = now();
+  switchTo(l, fs, at, current, previous, { current: previous, previous: current, installedAt: new Date(at).toISOString() });
   say(t(`Rolled back ${current} → ${previous}. Running sessions keep ${current} until they end.`, `已回退 ${current} → ${previous}。正在运行的会话结束前继续使用 ${current}。`));
   return 0;
 }
@@ -300,9 +330,9 @@ async function update(l: Layout, o: Options, current: string | undefined, env: R
   }
 
   mkdirSync(dirname(l.stable), { recursive: true });
-  activate(l, target, fs, now());
   const previous = current ?? readInstall(l).current;
-  writeInstall(l, { current: target, previous, installedAt: new Date(now()).toISOString() });
+  const at = now();
+  switchTo(l, fs, at, current, target, { current: target, previous, installedAt: new Date(at).toISOString() });
   cleanup(l, [target, ...(previous ? [previous] : [])], say, platform, fs);
   if (current) say(t(`Updated ${current} → ${target}. Running sessions keep ${current} until they end. Undo: cc-remote update --rollback`, `已更新 ${current} → ${target}。正在运行的会话结束前继续使用 ${current}。撤销：cc-remote update --rollback`));
   else say(t(`Installed cc-remote ${target} at ${l.stable}.`, `已在 ${l.stable} 安装 cc-remote ${target}。`));

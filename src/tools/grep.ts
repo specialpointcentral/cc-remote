@@ -65,13 +65,14 @@ export const grep = (ws: Workspace) => tool(
     const limit = input.head_limit === 0 ? Infinity : Math.max(1, input.head_limit ?? HEAD_LIMIT);
     const skip = Math.max(0, input.offset ?? 0);
     const path = abs(ws, input.path ?? ".");
-    // ripgrep reads a glob relative to its working directory: the directory searched, or the file's.
-    const target = forRipgrep(path);
+    // ripgrep reads a glob relative to its working directory: the directory searched, or the file's,
+    // with links resolved, so it gets the path resolved. grep needs neither: it gets the path given.
+    const target = bins.rg ? forRipgrep(path) : { real: path, shown: (line: string) => line };
     let cwd = target.real;
     let file = false;
     try { if (!statSync(target.real).isDirectory()) { cwd = dirname(target.real); file = true; } } catch { cwd = ws.root; }
     const proc = Bun.spawn(command(input, mode, target.real), { cwd, stdout: "pipe", stderr: "pipe", stdin: "ignore" });
-    // Each line starts with the file's path, except a single file's own lines.
+    // Each line starts with the file's path, except ripgrep's lines of a single file.
     const named = file && mode === "content" ? (line: string) => line : target.shown;
     // Errors are kept short, and the search stops once it has found what will be shown.
     const errors = head(proc.stderr);

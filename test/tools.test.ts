@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { snapshots } from "../src/tools/login";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -272,6 +272,21 @@ describe("Glob and Grep", () => {
       if (bins.rg) {
         await Bun.write(join(dir, "g/sub/deep.ts"), "needle\n");
         expect((await call(grep, { pattern: "needle", path: link, glob: "sub/*.ts" })).text).toBe(`Found 1 file\n${link}/sub/deep.ts`);
+      }
+      // grep gets the path as given. BSD grep names even a single file on each line, as grep -H does.
+      if (bins.grep) {
+        const saved = { ...bins };
+        const named = join(dir, "grep-H");
+        await Bun.write(named, `#!/bin/sh\nexec ${saved.grep} -H "$@"\n`);
+        chmodSync(named, 0o755);
+        Object.assign(bins, { rg: null, grep: named });
+        try {
+          const file = join(link, "new.ts");
+          expect((await call(grep, { pattern: "NEEDLE", path: file, output_mode: "content" })).text).toBe(`${file}:1:const NEEDLE = 2;`);
+          expect((await call(grep, { pattern: "NEEDLE", path: file, output_mode: "count" })).text).toBe(`${file}:1`);
+        } finally {
+          Object.assign(bins, saved);
+        }
       }
     } finally {
       rmSync(link);

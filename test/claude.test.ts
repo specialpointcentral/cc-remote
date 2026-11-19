@@ -4,10 +4,10 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough, type Readable } from "node:stream";
-import { hostLaunch, hostPlugins } from "../src/args";
+import { hostLaunch, hostPluginList, hostPlugins } from "../src/args";
 import { forwardedEnv } from "../src/claude";
 import { initialize, sdkHost } from "../src/control";
-import { pluginsApplied, readInitialize } from "../src/initialize";
+import { notAllApplied, readInitialize } from "../src/initialize";
 import { hostTools, REMOVED } from "../src/names";
 import { remote } from "../src/options";
 import { mirrorKey, projectsDir } from "../src/sessions";
@@ -62,12 +62,14 @@ describe("hostLaunch", () => {
     ]);
   });
 
-  test("a plugin that isn't readable here is left out, and said to be", () => {
-    const missing = join(dir, "no-such-plugin");
-    const launch = hostLaunch(["--plugin-dir", missing, "--input-format", "stream-json"], "/w", true);
-    expect(launch.uploads).toEqual([]);
-    expect(launch.leftOut).toEqual([missing]);
-    expect(launch.args.some((a) => a.startsWith("--plugin-dir"))).toBe(false);
+  test("a plugin that isn't readable here is left out, and so is one with an empty path, which isn't the project's folder", () => {
+    for (const value of [join(dir, "no-such-plugin"), ""]) {
+      const launch = hostLaunch(["--plugin-dir", value, "--input-format", "stream-json"], dir, true);
+      expect(launch.uploads).toEqual([]);
+      expect(launch.args.some((a) => a.startsWith("--plugin-dir"))).toBe(false);
+    }
+    expect(hostLaunch(["--input-format", "stream-json", "--plugin-dir"], dir, true).uploads).toEqual([]);
+    expect(hostPlugins(["--plugin-dir=", "--plugin-dir-no-mcp", ""], dir)).toEqual({ args: [], uploads: [] });
   });
 
   test("hostPlugins copies a command line's plugins up as hostLaunch does, and leaves the rest as it is", () => {
@@ -154,10 +156,12 @@ describe("hostLaunch", () => {
 });
 
 describe("pluginDelivery: initialize", () => {
+  /** The host's paths, as hostPluginList gives them, in a form a test can tell. */
+  const onHost = (list: unknown) => (list as { path: string }[]).map((p) => ({ ...p, path: `host:${p.path}` }));
   /** What readInitialize makes of `input` sent in pieces of `size` bytes: its result, and the stdin it passes on. */
-  async function read(input: string, size: number) {
+  async function read(input: string, size: number, rewrite: (list: unknown) => unknown[] = onHost) {
     const stream = new PassThrough();
-    const reading = readInitialize(stream);
+    const reading = readInitialize(stream, rewrite);
     const bytes = Buffer.from(input);
     for (let i = 0; i < bytes.length; i += size) stream.write(bytes.subarray(i, i + size));
     stream.end();
@@ -171,27 +175,44 @@ describe("pluginDelivery: initialize", () => {
   const before = '{"type":"keep_alive"}\n';
   const after = '{"type":"user","message":{"role":"user","content":"café"}}\n';
 
-  test("the request's plugins become flags, and it goes on without them, the lines around it as they were", async () => {
+  test("the request goes on naming the host's paths for its plugins, what follows it as it was", async () => {
     // In pieces of every size, so a line, and a character, can end anywhere in one.
     for (const size of [1, 2, 3, 7, 64, 4096]) {
-      const got = await read(`${before}${JSON.stringify(request)}\n${after}`, size);
-      expect(got.flags).toEqual(["--plugin-dir=/p/a", "--plugin-dir-no-mcp=rel/b"]);
+      const got = await read(`${JSON.stringify(request)}\n${after}`, size);
       expect(got.id).toBe("init-1");
-      expect(got.text).toBe(`${before}${JSON.stringify({ ...request, request: { subtype: "initialize", hooks: {} } })}\n${after}`);
+      expect(got.text).toBe(`${JSON.stringify({ ...request, request: { ...request.request, plugins: onHost(plugins) } })}\n${after}`);
     }
   });
 
-  test("a request without plugins goes on byte for byte, and so does a stdin that ends before one", async () => {
-    const plain = '{"type":"control_request","request_id":"i","request":{"subtype":"initialize","n":9007199254740993}}\n';
-    const got = await read(`${plain}${after}`, 5);
-    expect([got.flags, got.id, got.text]).toEqual([[], undefined, `${plain}${after}`]);
-    const ended = await read(`${before}{"type":"user"`, 4);
-    expect([ended.flags, ended.id, ended.text]).toEqual([[], undefined, `${before}{"type":"user"`]);
+  test("only the first line is read: a request after another, one without plugins, a stdin that ends first go on byte for byte", async () => {
+    const untouched = () => { throw new Error("not a first initialize request with plugins"); };
+    for (const input of [
+      `${before}${JSON.stringify(request)}\n`,
+      `{"type":"control_request","request_id":"i","request":{"subtype":"initialize","n":9007199254740993}}\n${after}`,
+      `${before.trim()}`,
+    ]) {
+      const got = await read(input, 5, untouched);
+      expect([got.id, got.text]).toEqual([undefined, input]);
+    }
   });
 
-  test("claude's answer to that request says whether the plugins were copied up, once", () => {
-    const answer = (id: string) => JSON.stringify({ type: "control_response", response: { subtype: "success", request_id: id, response: { commands: [] } } });
-    const patch = pluginsApplied("init-1", false);
+  test("the list as the host gets it: copies with the host's paths, without the plugins that can't be copied", () => {
+    const local = join(dir, "listed");
+    mkdirSync(join(local, "skills", "x"), { recursive: true });
+    const cwd = "/work/app";
+    const up = "../".repeat(hostDir(cwd).split("/").length);
+    const remote = hostLaunch(["--plugin-dir", local], cwd, true).uploads[0]!.remote;
+    const other = { type: "other", name: "x" };
+    const got = hostPluginList([{ type: "local", path: local, skipMcpDiscovery: true }, { type: "local", path: "" }, { type: "local", path: join(dir, "no-such-plugin") }, { type: "local" }, other], cwd);
+    expect(got.plugins).toEqual([{ type: "local", path: `${up}${remote}`, skipMcpDiscovery: true }, other]);
+    expect(got.uploads).toEqual([{ local, remote }]);
+    expect(got.leftOut).toBe(3);
+    expect(hostPluginList("not a list", cwd)).toEqual({ plugins: [], uploads: [], leftOut: 0 });
+  });
+
+  test("when a plugin was left out, claude's answer to that request says they aren't all loaded, once", () => {
+    const answer = (id: string) => JSON.stringify({ type: "control_response", response: { subtype: "success", request_id: id, response: { commands: [], plugins_applied: true } } });
+    const patch = notAllApplied("init-1");
     expect(patch(answer("init-10"))).toBe(answer("init-10"));
     expect(JSON.parse(patch(answer("init-1"))).response.response).toEqual({ commands: [], plugins_applied: false });
     expect(patch(answer("init-1"))).toBe(answer("init-1"));
@@ -425,7 +446,7 @@ describe("cc-remote claude", () => {
     return path;
   };
 
-  test("with pluginDelivery: initialize, the request's plugins go up as copies, and claude still waits for the request", async () => {
+  test("with pluginDelivery: initialize, the request's plugins go up as copies, which it then names for claude", async () => {
     const local = plugin("init-plugin");
     host.reset();
     const proc = Bun.spawn(["bun", join(import.meta.dir, "..", "src", "main.ts"), "--host", "box", "claude", "--output-format", "stream-json", "--verbose", "--input-format", "stream-json", "--await-initialize"], {
@@ -436,19 +457,22 @@ describe("cc-remote claude", () => {
       stderr: "pipe",
     });
     const out = reader(proc.stdout);
-    proc.stdin.write(`${JSON.stringify({ type: "control_request", request_id: "init-1", request: { subtype: "initialize", plugins: [{ type: "local", path: local, skipMcpDiscovery: true }] } })}\n`);
+    // One plugin to copy, and one with an empty path, which is left out.
+    proc.stdin.write(`${JSON.stringify({ type: "control_request", request_id: "init-1", request: { subtype: "initialize", plugins: [{ type: "local", path: local, skipMcpDiscovery: true }, { type: "local", path: "" }] } })}\n`);
     const args = await out.find((l) => l.startsWith("ARGS"));
     expect(args).toContain("[--await-initialize]");
-    const flag = /\[--plugin-dir-no-mcp=(?:\.\.\/)+(\.cc-remote\/plugins\/init-plugin-[0-9a-z]+)\]/.exec(args);
-    expect(flag).not.toBeNull();
-    expect(readFileSync(join(host.home, flag![1]!, "skills", "x", "SKILL.md"), "utf8")).toBe("---\nname: x\n---\ninit-plugin\n");
+    expect(args).not.toContain("--plugin-dir");
     const request = JSON.parse(await out.find((l) => l.includes('"control_request"') && l.includes('"init-1"'))).request;
     expect(request.subtype).toBe("initialize");
-    expect(request).not.toHaveProperty("plugins");
-    // The fake claude echoes its stdin, so an answer written there comes back as claude's.
-    proc.stdin.write(`${JSON.stringify({ type: "control_response", response: { subtype: "success", request_id: "init-1", response: {} } })}\n`);
+    expect(request.plugins).toEqual([{ type: "local", path: expect.stringMatching(/^(\.\.\/)+\.cc-remote\/plugins\/init-plugin-[0-9a-z]+$/), skipMcpDiscovery: true }]);
+    // The path is from claude's folder on the host.
+    const copy = join(host.home, hostDir(join(dir, "work-entry")), request.plugins[0].path);
+    expect(readFileSync(join(copy, "skills", "x", "SKILL.md"), "utf8")).toBe("---\nname: x\n---\ninit-plugin\n");
+    // The fake claude echoes its stdin, so an answer written there comes back as claude's: it says
+    // the plugins it was given are loaded, but one never reached it.
+    proc.stdin.write(`${JSON.stringify({ type: "control_response", response: { subtype: "success", request_id: "init-1", response: { plugins_applied: true } } })}\n`);
     const answer = JSON.parse(await out.find((l) => l.includes('"control_response"') && l.includes('"init-1"')));
-    expect(answer.response.response).toEqual({ plugins_applied: true });
+    expect(answer.response.response).toEqual({ plugins_applied: false });
     proc.stdin.end();
     expect(await proc.exited).toBe(0);
   }, SPAWNS);

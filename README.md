@@ -413,8 +413,9 @@ server first. On the server, each local directory gets its own working folder at
 **Starting a session.** Before claude starts, one check on the server looks for what the session
 needs: the transcript of a session being resumed, plugins the client passes, and the project's
 `.claude/commands`, `.claude/skills` and `.claude/agents` (see [Limits](#limits)). Plugins come as
-`--plugin-dir` or, with the SDK's `pluginDelivery: 'initialize'`, in its first request, which
-cc-remote then reads before claude starts. When they are all
+`--plugin-dir` or, with the SDK's `pluginDelivery: 'initialize'`, in its first request. cc-remote
+then reads that request before claude starts and passes it on naming the copies on the server, so
+claude itself reports whether it loaded them. When they are all
 there, which is the usual case, the session starts on a single ssh channel. Otherwise cc-remote
 uploads only what is missing and starts again. Nothing your client sends is lost or repeated in
 between.

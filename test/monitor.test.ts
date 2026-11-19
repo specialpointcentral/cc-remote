@@ -5,7 +5,7 @@ import { join } from "node:path";
 import type { Watcher, WatchLink } from "../src/host-process";
 import { type MonitorInput, Monitors } from "../src/monitor";
 import { resetLocalSettings } from "../src/local-settings";
-import { stopping } from "../src/tools/shell";
+import { killAll, stopping } from "../src/tools/shell";
 import { workspace } from "../src/tools/util";
 import { isolate } from "./fixture";
 
@@ -157,6 +157,26 @@ describe("Monitors", () => {
     await until(() => children.every((c) => !alive(c)));
     // Nothing is left for the session's end to stop.
     monitors.closeAll();
+  }, 20_000);
+
+  test("a child that ignores SIGTERM is still killed when cc-remote exits before its grace period ends", async () => {
+    const { monitors, k, root, token } = setup();
+    const pids = join(root, "stubborn");
+    // No timer fires during the test: only the cleanup at cc-remote's exit can kill it.
+    stopping.graceMs = 60_000;
+    try {
+      // The child says its pid once SIGTERM is ignored, and the command exits only after that.
+      monitors.start(1, token(monitors.approve({ command: `sh -c 'trap "" TERM; echo $$ > ${pids}; exec sleep 30' >/dev/null 2>&1 & until [ -s ${pids} ]; do sleep 0.05; done; echo up` })));
+      await until(() => k.ends.has(1));
+      const child = Number(readFileSync(pids, "utf8").trim());
+      await Bun.sleep(300);
+      expect(alive(child)).toBe(true); // It was sent SIGTERM, and ignored it.
+      stopping.graceMs = 300;
+      killAll();
+      await until(() => !alive(child), 5_000);
+    } finally {
+      stopping.graceMs = 500;
+    }
   }, 20_000);
 
   test("stdout waits while the host is behind, and goes on once it catches up", async () => {

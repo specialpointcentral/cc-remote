@@ -20,6 +20,8 @@ export type HostLaunch = {
   args: string[];
   /** Local plugins the host gets a copy of first. */
   uploads: Upload[];
+  /** Local plugins left out, not being readable here. */
+  leftOut: string[];
   /** `--add-dir` directories. They are local, so the host doesn't get them; the prompt names them. */
   addDirs: string[];
   /** The servers of `--mcp-config`. They are local and get bridged instead of started on the host. */
@@ -52,6 +54,62 @@ function plainFingerprint(path: string, salt = ""): string {
   return `${basename(path, ext).replace(/[^\w.-]/g, "_")}-${Bun.hash(`${path}\n${files.join("\n")}${salt}`).toString(36)}${ext}`;
 }
 
+/** The flags that name a local plugin, which the host gets a copy of. */
+const PLUGIN_FLAGS = new Set(["--plugin-dir", "--plugin-dir-no-mcp"]);
+
+/** From the host folder for `cwd`, up to the host's home: the plugins live there, outside any one project. */
+const toHome = (cwd: string) => "../".repeat(hostDir(cwd).split("/").filter(Boolean).length);
+
+/**
+ * A local plugin as the host gets it: copied up first, and named there by the flag. Undefined, with
+ * a note, when it isn't readable here.
+ */
+function hostPlugin(flag: string, value: string, cwd: string): { arg: string; upload: Upload } | undefined {
+  const local = resolve(cwd, value);
+  try {
+    const remote = `.cc-remote/plugins/${fingerprint(local)}`;
+    return { arg: `${flag}=${toHome(cwd)}${remote}`, upload: { local, remote } };
+  } catch {
+    console.error(`cc-remote: leaving out the plugin ${local}, which is not readable here`);
+    return undefined;
+  }
+}
+
+/**
+ * A command line with its plugins copied up as hostLaunch has them, and the rest as it is: for
+ * claude-agent-acp's sessions, whose other options cc-remote sets itself (options.ts).
+ */
+export function hostPlugins(argv: string[], cwd: string): { args: string[]; uploads: Upload[] } {
+  const args: string[] = [];
+  const uploads: Upload[] = [];
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i]!;
+    const eq = a.startsWith("--") ? a.indexOf("=") : -1;
+    const flag = eq > 0 ? a.slice(0, eq) : a;
+    if (!PLUGIN_FLAGS.has(flag)) {
+      args.push(a);
+      continue;
+    }
+    const plugin = hostPlugin(flag, eq > 0 ? a.slice(eq + 1) : (argv[++i] ?? ""), cwd);
+    if (plugin) {
+      args.push(plugin.arg);
+      uploads.push(plugin.upload);
+    }
+  }
+  return { args, uploads };
+}
+
+/**
+ * The flags for the plugins an SDK lists in its initialize request, which it sends there in place
+ * of the flags with pluginDelivery: 'initialize'.
+ */
+export function pluginFlags(plugins: unknown): string[] {
+  if (!Array.isArray(plugins)) return [];
+  return plugins.flatMap((p) =>
+    p?.type === "local" && typeof p.path === "string" ? [`${p.skipMcpDiscovery === true ? "--plugin-dir-no-mcp" : "--plugin-dir"}=${p.path}`] : [],
+  );
+}
+
 const isJson = (value: string) => /^\s*[{[]/.test(value);
 
 function readJson(value: string, cwd: string): unknown {
@@ -76,14 +134,12 @@ function inline(value: string, cwd: string): string {
  */
 export function hostLaunch(argv: string[], cwd: string, stream: boolean): HostLaunch {
   const out: string[] = [];
-  const launch: HostLaunch = { args: out, uploads: [], addDirs: [], mcpServers: {}, strictMcpConfig: false, mode: "default" };
+  const launch: HostLaunch = { args: out, uploads: [], leftOut: [], addDirs: [], mcpServers: {}, strictMcpConfig: false, mode: "default" };
   const allowed: string[] = [];
   const disallowed: string[] = [];
   // A stream session under the relay keeps claude's Monitor, whose commands run here: its tools are named, not denied.
   const relayed = stream && reconnectGrace() > 0;
   let tools: string[] | undefined;
-  // From the host folder, up to the host's home: the plugins live there, outside any one project.
-  const toHome = "../".repeat(hostDir(cwd).split("/").filter(Boolean).length);
 
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!;
@@ -109,16 +165,13 @@ export function hostLaunch(argv: string[], cwd: string, stream: boolean): HostLa
           console.error(`cc-remote: ignoring the MCP config ${value.slice(0, 80)}: ${(e as Error).message}`);
         }
       }
-    } else if (flag === "--plugin-dir" || flag === "--plugin-dir-no-mcp") {
+    } else if (PLUGIN_FLAGS.has(flag)) {
       const [value = ""] = values();
-      const local = resolve(cwd, value);
-      try {
-        const remote = `.cc-remote/plugins/${fingerprint(local)}`;
-        launch.uploads.push({ local, remote });
-        out.push(`${flag}=${toHome}${remote}`);
-      } catch {
-        console.error(`cc-remote: leaving out the plugin ${local}, which is not readable here`);
-      }
+      const plugin = hostPlugin(flag, value, cwd);
+      if (plugin) {
+        launch.uploads.push(plugin.upload);
+        out.push(plugin.arg);
+      } else launch.leftOut.push(resolve(cwd, value));
     } else if (JSON_OR_FILE.has(flag)) {
       const [value = ""] = values();
       out.push(flag, isJson(value) ? value : inline(value, cwd));

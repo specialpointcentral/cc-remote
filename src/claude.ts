@@ -5,6 +5,7 @@ import { sdkHost } from "./control";
 import { grantsSession } from "./grants";
 import { sessionHooks } from "./hooks";
 import type { HostProcess } from "./host-process";
+import { type Initialize, pluginsApplied, readInitialize } from "./initialize";
 import { localMcpServers } from "./mcp";
 import { environment } from "./prompt";
 import { proxy } from "./proxy";
@@ -82,7 +83,9 @@ export async function claudeCompat(host: string, argv: string[]): Promise<void> 
     process.exit(1);
   }
 
-  const plan = hostLaunch(argv, cwd, stream);
+  // With pluginDelivery: 'initialize' the plugins are in the SDK's first request: read it first.
+  const init: Initialize | undefined = stream && argv.includes("--await-initialize") ? await readInitialize(process.stdin) : undefined;
+  const plan = hostLaunch(init ? [...argv, ...init.flags] : argv, cwd, stream);
   const env = forwardedEnv(process.env);
   if (!stream) {
     // A one-off `-p`, such as a title: no SDK on the other end, so no local tools either.
@@ -111,8 +114,13 @@ export async function claudeCompat(host: string, argv: string[]): Promise<void> 
   const hooks = sessionHooks(cwd, plan.args, ws);
   const child = launch(host, cwd, plan.args, { ...env, CLAUDE_CODE_DISABLE_CLAUDE_MDS: "1" }, plan.uploads, undefined, tellTools(host, ws), hooks.host);
   const session = { cwd, hostDir: hostDir(cwd), mode: plan.mode, dirs: plan.addDirs, ws, sessionId: grantsSession(plan.args), hooks };
-  const sdk = proxy(asChild(child), session, (toClaude) => sdkHost(servers, prompt, toClaude));
-  process.stdin.pipe(sdk.stdin);
+  const applied = init?.id ? pluginsApplied(init.id, plan.leftOut.length === 0) : undefined;
+  const sdk = proxy(asChild(child), session, (toClaude) => {
+    const layer = sdkHost(servers, prompt, toClaude);
+    if (!applied) return layer;
+    return { inbound: layer.inbound, outbound: (line) => { const out = layer.outbound(line); return out === null ? null : applied(out); } };
+  });
+  (init?.input ?? process.stdin).pipe(sdk.stdin);
   sdk.stdout.pipe(process.stdout);
   exitWith(child, sdk.stdout);
 }

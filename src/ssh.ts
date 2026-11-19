@@ -3,6 +3,7 @@ import { type ChildProcess, spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { hostname, userInfo } from "node:os";
 import { resolve } from "node:path";
+import { hostPlugins } from "./args";
 import { grantsSession } from "./grants";
 import { bundle, checkScript, installScript, type Need, type Ready, readyFields } from "./host-files";
 import { HostFiles } from "./host-fs";
@@ -400,7 +401,9 @@ export function spawner(host: string, cwd: string, env: Record<string, string>, 
     );
     // The SDK speaks stream-json; the hooks of this machine's settings run here, or through the host's --settings.
     const hooks = argument(options.args, "--input-format") === "stream-json" ? sessionHooks(cwd, options.args, ws) : undefined;
-    const child = launch(host, cwd, options.args, { ...added, ...env }, [], options.signal, tellTools(host, ws), hooks?.host);
+    // Plugins are local paths: the host gets copies, as under `cc-remote claude`.
+    const plugins = hostPlugins(options.args, cwd);
+    const child = launch(host, cwd, plugins.args, { ...added, ...env }, plugins.uploads, options.signal, tellTools(host, ws), hooks?.host);
     const mode = argument(options.args, "--permission-mode") ?? "default";
     return proxy(asChild(child), { cwd, hostDir: hostDir(cwd), mode, ws, sessionId: grantsSession(options.args), hooks });
   };

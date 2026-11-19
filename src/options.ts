@@ -39,6 +39,8 @@ export function remote(host: string) {
       ...options,
       pathToClaudeCodeExecutable: "claude",
       spawnClaudeCodeProcess: spawner(host, cwd, { CLAUDE_CODE_DISABLE_CLAUDE_MDS: "1" }, ws),
+      // As flags, which the spawner turns into copies on the host, not in the initialize request.
+      pluginDelivery: "argv",
       additionalDirectories: [],
       systemPrompt: withEnvironment(options.systemPrompt, env),
       // The client's servers win over the config's: it chose them for this session.

@@ -354,6 +354,8 @@ cc-remote 会先把它复制到服务器。在服务器上，每个本地目录�
 
 **启动会话。** claude 启动之前，会在服务器上做一次检查，看会话需要的东西在不在：要恢复的会话记录、
 客户端传来的插件，以及项目的 `.claude/commands`、`.claude/skills` 和 `.claude/agents`（见[限制](#限制)）。
+插件可以通过 `--plugin-dir` 传来；SDK 用 `pluginDelivery: 'initialize'` 时则放在它的第一个请求里，
+这时 cc-remote 会先读这个请求，再启动 claude。
 通常它们都在，这时会话只用一个 ssh 通道就能启动。缺了什么，cc-remote 就只上传缺的部分，然后重新启动。
 这期间客户端发来的内容不会丢失，也不会重复。
 

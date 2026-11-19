@@ -1,15 +1,19 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { hostLaunch } from "../src/args";
+import { PassThrough, type Readable } from "node:stream";
+import { hostLaunch, hostPlugins } from "../src/args";
 import { forwardedEnv } from "../src/claude";
 import { initialize, sdkHost } from "../src/control";
+import { pluginsApplied, readInitialize } from "../src/initialize";
 import { hostTools, REMOVED } from "../src/names";
+import { remote } from "../src/options";
 import { mirrorKey, projectsDir } from "../src/sessions";
-import { argument, hostDir } from "../src/ssh";
+import { argument, hostDir, spawner } from "../src/ssh";
 import { localTools } from "../src/tools";
+import { workspace } from "../src/tools/util";
 import { fakeHost, TEAMS_OFF } from "./fakehost";
 
 const dir = mkdtempSync(join(tmpdir(), "cc-remote-claude-"));
@@ -56,6 +60,23 @@ describe("hostLaunch", () => {
       `--disallowedTools=${hostTools(true).disallowed.join(",")}`,
       "--session-mirror",
     ]);
+  });
+
+  test("a plugin that isn't readable here is left out, and said to be", () => {
+    const missing = join(dir, "no-such-plugin");
+    const launch = hostLaunch(["--plugin-dir", missing, "--input-format", "stream-json"], "/w", true);
+    expect(launch.uploads).toEqual([]);
+    expect(launch.leftOut).toEqual([missing]);
+    expect(launch.args.some((a) => a.startsWith("--plugin-dir"))).toBe(false);
+  });
+
+  test("hostPlugins copies a command line's plugins up as hostLaunch does, and leaves the rest as it is", () => {
+    const cwd = "/work/app";
+    const up = "../".repeat(hostDir(cwd).split("/").length);
+    const { args, uploads } = hostPlugins(["--input-format", "stream-json", `--plugin-dir=${plugin}`, "--plugin-dir-no-mcp", plugin, `--plugin-dir=${join(dir, "no-such-plugin")}`, "--verbose"], cwd);
+    const remote = hostLaunch(["--plugin-dir", plugin], cwd, true).uploads[0]!.remote;
+    expect(uploads).toEqual([{ local: plugin, remote }, { local: plugin, remote }]);
+    expect(args).toEqual(["--input-format", "stream-json", `--plugin-dir=${up}${remote}`, `--plugin-dir-no-mcp=${up}${remote}`, "--verbose"]);
   });
 
   test("a plugin gets a new name on the host when its content changes", () => {
@@ -129,6 +150,57 @@ describe("hostLaunch", () => {
       "-p", "--output-format", "text", "--model", "sonnet", "--tools", "Read,Grep,Glob", "--permission-mode", "dontAsk", "--effort", "low",
       "--strict-mcp-config", "--settings", '{"disableAllHooks":true}', "--allowedTools=Read,Grep,Glob", `--disallowedTools=${REMOVED.join(",")}`,
     ]);
+  });
+});
+
+describe("pluginDelivery: initialize", () => {
+  /** What readInitialize makes of `input` sent in pieces of `size` bytes: its result, and the stdin it passes on. */
+  async function read(input: string, size: number) {
+    const stream = new PassThrough();
+    const reading = readInitialize(stream);
+    const bytes = Buffer.from(input);
+    for (let i = 0; i < bytes.length; i += size) stream.write(bytes.subarray(i, i + size));
+    stream.end();
+    const init = await reading;
+    const chunks: Buffer[] = [];
+    for await (const chunk of init.input as Readable) chunks.push(Buffer.from(chunk));
+    return { ...init, text: Buffer.concat(chunks).toString() };
+  }
+  const plugins = [{ type: "local", path: "/p/a" }, { type: "local", path: "rel/b", skipMcpDiscovery: true }];
+  const request = { type: "control_request", request_id: "init-1", request: { subtype: "initialize", hooks: {}, plugins } };
+  const before = '{"type":"keep_alive"}\n';
+  const after = '{"type":"user","message":{"role":"user","content":"café"}}\n';
+
+  test("the request's plugins become flags, and it goes on without them, the lines around it as they were", async () => {
+    // In pieces of every size, so a line, and a character, can end anywhere in one.
+    for (const size of [1, 2, 3, 7, 64, 4096]) {
+      const got = await read(`${before}${JSON.stringify(request)}\n${after}`, size);
+      expect(got.flags).toEqual(["--plugin-dir=/p/a", "--plugin-dir-no-mcp=rel/b"]);
+      expect(got.id).toBe("init-1");
+      expect(got.text).toBe(`${before}${JSON.stringify({ ...request, request: { subtype: "initialize", hooks: {} } })}\n${after}`);
+    }
+  });
+
+  test("a request without plugins goes on byte for byte, and so does a stdin that ends before one", async () => {
+    const plain = '{"type":"control_request","request_id":"i","request":{"subtype":"initialize","n":9007199254740993}}\n';
+    const got = await read(`${plain}${after}`, 5);
+    expect([got.flags, got.id, got.text]).toEqual([[], undefined, `${plain}${after}`]);
+    const ended = await read(`${before}{"type":"user"`, 4);
+    expect([ended.flags, ended.id, ended.text]).toEqual([[], undefined, `${before}{"type":"user"`]);
+  });
+
+  test("claude's answer to that request says whether the plugins were copied up, once", () => {
+    const answer = (id: string) => JSON.stringify({ type: "control_response", response: { subtype: "success", request_id: id, response: { commands: [] } } });
+    const patch = pluginsApplied("init-1", false);
+    expect(patch(answer("init-10"))).toBe(answer("init-10"));
+    expect(JSON.parse(patch(answer("init-1"))).response.response).toEqual({ commands: [], plugins_applied: false });
+    expect(patch(answer("init-1"))).toBe(answer("init-1"));
+  });
+
+  test("under claude-agent-acp the SDK is told to send them as flags", async () => {
+    const options = await remote("box")({ cwd: dir, plugins: [{ type: "local", path: "/p/a" }], pluginDelivery: "initialize" });
+    expect(options.pluginDelivery).toBe("argv");
+    expect(options.plugins).toEqual([{ type: "local", path: "/p/a" }]);
   });
 });
 
@@ -319,5 +391,89 @@ describe("cc-remote claude", () => {
     expect(remote).toContain("Compression=yes");
     expect(remote).not.toContain("secret");
     expect(remote).not.toContain("/local/only");
+  }, SPAWNS);
+
+  /** Lines from a stream, as they come. */
+  function reader(stream: NodeJS.ReadableStream | ReadableStream<Uint8Array>) {
+    const lines: string[] = [];
+    let buffer = "";
+    const take = (chunk: Buffer | Uint8Array) => {
+      buffer += Buffer.from(chunk).toString();
+      for (let nl = buffer.indexOf("\n"); nl >= 0; nl = buffer.indexOf("\n")) {
+        lines.push(buffer.slice(0, nl));
+        buffer = buffer.slice(nl + 1);
+      }
+    };
+    if ("on" in stream) stream.on("data", take);
+    else void (async () => { for await (const chunk of stream as unknown as AsyncIterable<Uint8Array>) take(chunk); })();
+    const find = async (match: (line: string) => boolean) => {
+      for (let i = 0; i < 400; i++) {
+        const found = lines.find(match);
+        if (found !== undefined) return found;
+        await Bun.sleep(25);
+      }
+      throw new Error(`not seen; got:\n${lines.join("\n")}`);
+    };
+    return { lines, find };
+  }
+
+  /** A plugin folder with one skill. */
+  const plugin = (name: string) => {
+    const path = join(dir, name);
+    mkdirSync(join(path, "skills", "x"), { recursive: true });
+    writeFileSync(join(path, "skills", "x", "SKILL.md"), `---\nname: x\n---\n${name}\n`);
+    return path;
+  };
+
+  test("with pluginDelivery: initialize, the request's plugins go up as copies, and claude still waits for the request", async () => {
+    const local = plugin("init-plugin");
+    host.reset();
+    const proc = Bun.spawn(["bun", join(import.meta.dir, "..", "src", "main.ts"), "--host", "box", "claude", "--output-format", "stream-json", "--verbose", "--input-format", "stream-json", "--await-initialize"], {
+      cwd: join(dir, "work-entry"),
+      env: { ...Bun.env, ...host.env, XDG_CACHE_HOME: cache, CC_REMOTE_RECONNECT_GRACE: "0" },
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const out = reader(proc.stdout);
+    proc.stdin.write(`${JSON.stringify({ type: "control_request", request_id: "init-1", request: { subtype: "initialize", plugins: [{ type: "local", path: local, skipMcpDiscovery: true }] } })}\n`);
+    const args = await out.find((l) => l.startsWith("ARGS"));
+    expect(args).toContain("[--await-initialize]");
+    const flag = /\[--plugin-dir-no-mcp=(?:\.\.\/)+(\.cc-remote\/plugins\/init-plugin-[0-9a-z]+)\]/.exec(args);
+    expect(flag).not.toBeNull();
+    expect(readFileSync(join(host.home, flag![1]!, "skills", "x", "SKILL.md"), "utf8")).toBe("---\nname: x\n---\ninit-plugin\n");
+    const request = JSON.parse(await out.find((l) => l.includes('"control_request"') && l.includes('"init-1"'))).request;
+    expect(request.subtype).toBe("initialize");
+    expect(request).not.toHaveProperty("plugins");
+    // The fake claude echoes its stdin, so an answer written there comes back as claude's.
+    proc.stdin.write(`${JSON.stringify({ type: "control_response", response: { subtype: "success", request_id: "init-1", response: {} } })}\n`);
+    const answer = JSON.parse(await out.find((l) => l.includes('"control_response"') && l.includes('"init-1"')));
+    expect(answer.response.response).toEqual({ plugins_applied: true });
+    proc.stdin.end();
+    expect(await proc.exited).toBe(0);
+  }, SPAWNS);
+
+  test("under claude-agent-acp, the spawner copies the plugins of the command line up", async () => {
+    const local = plugin("acp-plugin");
+    const cwd = join(dir, "work-entry");
+    const keys = Object.keys(host.env);
+    const saved = Object.fromEntries(keys.map((k) => [k, Bun.env[k]]));
+    Object.assign(Bun.env, host.env);
+    try {
+      const abort = new AbortController();
+      const sdk = spawner("box", cwd, {}, workspace(cwd))({ command: "claude", args: ["--input-format", "stream-json", `--plugin-dir=${local}`], env: { ...process.env }, signal: abort.signal });
+      const args = await reader(sdk.stdout).find((l) => l.startsWith("ARGS"));
+      const flag = /\[--plugin-dir=(?:\.\.\/)+(\.cc-remote\/plugins\/acp-plugin-[0-9a-z]+)\]/.exec(args);
+      expect(flag).not.toBeNull();
+      expect(existsSync(join(host.home, flag![1]!, "skills", "x", "SKILL.md"))).toBe(true);
+      const exited = new Promise((done) => sdk.once("exit", done));
+      abort.abort();
+      await exited;
+    } finally {
+      for (const k of keys) {
+        if (saved[k] === undefined) delete Bun.env[k];
+        else Bun.env[k] = saved[k];
+      }
+    }
   }, SPAWNS);
 });

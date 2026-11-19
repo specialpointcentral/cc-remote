@@ -17,8 +17,11 @@ import { archive, type TarFile } from "./tar";
  *
  * A session start checks for all of them on the host, and sends only what's missing.
  */
+/** How a file goes to the host under redaction: its name, and its bytes (by its name: JSON as JSON). */
+export type FileFilter = { path: (path: string) => string; data: (path: string, data: Uint8Array) => Uint8Array };
+
 export type Need =
-  | { kind: "plugin"; local: string; remote: string }
+  | { kind: "plugin"; local: string; remote: string; redact?: FileFilter }
   | { kind: "transcript"; local: string; sessionId: string; filter?: (data: Uint8Array) => Uint8Array }
   | { kind: "project"; files: ClaudeFile[]; stamp: string }
   | { kind: "relay"; remote: string; data: Uint8Array };
@@ -173,12 +176,17 @@ export function bundle(needs: Need[], missing: number[]): Uint8Array {
       continue;
     }
     const info = statSync(need.local);
-    if (info.isDirectory()) walk(need.local, `${i}`, files);
-    else {
+    const redact = need.kind === "plugin" ? need.redact : undefined;
+    if (info.isDirectory()) {
+      const found: TarFile[] = [];
+      walk(need.local, `${i}`, found);
+      files.push(...(redact ? found.map((f) => ({ ...f, path: redact.path(f.path), data: redact.data(f.path, f.data) })) : found));
+    } else {
       const data = readFileSync(need.local);
       // A transcript is private, as claude keeps it; under redaction it goes with placeholders.
       const transcript = need.kind === "transcript";
-      files.push({ path: `${i}`, data: transcript && need.filter ? need.filter(data) : data, mode: transcript ? 0o600 : mode(info.mode), mtime: Math.floor(info.mtimeMs / 1000) });
+      const sent = transcript && need.filter ? need.filter(data) : redact ? redact.data(need.local, data) : data;
+      files.push({ path: `${i}`, data: sent, mode: transcript ? 0o600 : mode(info.mode), mtime: Math.floor(info.mtimeMs / 1000) });
     }
   }
   return archive(files);

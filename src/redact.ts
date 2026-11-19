@@ -75,8 +75,18 @@ const tail = (kind: Kind) => (kind === "dom" ? ".invalid" : "");
 const RESTORE = new RegExp(KINDS.map((k) => `${EDGES[k][0]}ccr-${k}-[0-9a-f]{8,16}${escape(tail(k))}${EDGES[k][1]}`).join("|"), "g");
 const PLACEHOLDER = /^ccr-[a-z0-9]+-[0-9a-f]{8,16}(?:\.invalid)?$/;
 
-/** Lines that may carry base64 data, whose bytes are left alone. */
-const BINARY = /"(?:base64|mimeType|media_type)"/;
+/**
+ * Fields whose string values are words of claude's protocol, never this machine's: a message's type
+ * and role, a model, a permission mode. A listed name that happens to be such a word stays there.
+ */
+const PROTOCOL = new Set(["type", "subtype", "role", "model", "stop_reason", "behavior", "mode", "permissionMode", "hook_event_name"]);
+/** A key that is a plain identifier names a field, part of the format; any other (a path, a host) is data. */
+const FIELD = /^[A-Za-z_][A-Za-z0-9_]*$/;
+/** Flags whose value is a word of claude's, such as a model or a format, rather than data. */
+const WORD_FLAGS = new Set(["--model", "--fallback-model", "--permission-mode", "--input-format", "--output-format", "--setting-sources", "--effort"]);
+const FLAG = /^--?[A-Za-z][A-Za-z0-9-]*(?:=|$)/;
+/** Longer than any placeholder, `ccr-name-` and 16 hex digits and `.invalid`. */
+const PLACEHOLDER_MAX = 40;
 
 const strict = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 const encoder = new TextEncoder();
@@ -134,18 +144,19 @@ function holdFrom(text: string): number {
 
 /**
  * Applies a filter to a byte stream a line at a time, so a value is never split between two
- * chunks; a very long line is filtered in pieces.
+ * chunks. A line longer than `max` goes in pieces: each ends on a whole character, which the
+ * filter needs to read it as text, and where `cut` says no value is split.
  */
 export class Lines {
   private held: Uint8Array[] = [];
   private size = 0;
-  constructor(private readonly f: (b: Uint8Array) => Uint8Array, private readonly max = 64 * 1024) {}
+  constructor(private readonly f: (b: Uint8Array) => Uint8Array, private readonly max = 64 * 1024, private readonly cut?: (s: string) => number) {}
 
   push(chunk: Uint8Array): Uint8Array {
     const nl = chunk.lastIndexOf(10);
     if (nl < 0) {
       this.hold(chunk);
-      return this.size > this.max ? this.flush() : EMPTY;
+      return this.size > this.max ? this.piece() : EMPTY;
     }
     const out = this.f(Buffer.concat([...this.held, chunk.subarray(0, nl + 1)]));
     this.held = [];
@@ -162,10 +173,46 @@ export class Lines {
     return this.f(all);
   }
 
+  /** The front of a long line, as far as it can go; the rest waits for more. */
+  private piece(): Uint8Array {
+    const all = Buffer.concat(this.held);
+    const end = safeEnd(all, this.cut);
+    this.held = end < all.length ? [all.slice(end)] : [];
+    this.size = all.length - end;
+    return end ? this.f(all.subarray(0, end)) : EMPTY;
+  }
+
   private hold(b: Uint8Array) {
     this.held.push(b.slice());
     this.size += b.length;
   }
+}
+
+/**
+ * How much of `b` can be filtered now: whole characters only (a character `b` ends inside of waits
+ * for its other bytes), and no further than `cut` says. All of it when it isn't text, which a
+ * filter passes as it is.
+ */
+function safeEnd(b: Uint8Array, cut?: (s: string) => number): number {
+  let end = b.length;
+  for (let i = b.length - 1; i >= 0 && i >= b.length - 4; i--) {
+    const x = b[i]!;
+    if (x < 0x80) break;
+    if (x >= 0xc0) {
+      if (b.length - i < (x >= 0xf0 ? 4 : x >= 0xe0 ? 3 : 2)) end = i;
+      break;
+    }
+  }
+  let s: string;
+  try {
+    s = strict.decode(b.subarray(0, end));
+  } catch {
+    return b.length;
+  }
+  if (!cut) return end;
+  let c = cut(s);
+  if (c > 0 && c < s.length && s.charCodeAt(c - 1) >= 0xd800 && s.charCodeAt(c - 1) <= 0xdbff) c--;
+  return Buffer.byteLength(s.slice(0, c));
 }
 
 export type RedactorOptions = {
@@ -189,6 +236,8 @@ export class Redactor {
   private readonly toPlaceholder = new Map<string, string>();
   private readonly fromPlaceholder = new Map<string, string>();
   private readonly persist?: (entries: Record<string, string>) => void;
+  /** The longest value's length: a piece of a long line keeps that much back. */
+  private readonly longest: number;
 
   constructor(private readonly key: Uint8Array, values: Value[], o: RedactorOptions) {
     this.on = o.on;
@@ -198,9 +247,16 @@ export class Redactor {
     this.values = values
       .filter((v) => v.text.length >= MIN_LENGTH && !seen.has(v.text.toLowerCase()) && seen.add(v.text.toLowerCase()))
       .sort((a, b) => b.text.length - a.text.length);
+    this.longest = this.values[0]?.text.length ?? 0;
     for (const v of this.values) {
       this.kinds.set(v.text.toLowerCase(), v.kind);
       for (const spelling of new Set([v.text, v.text.toLowerCase(), v.text.toUpperCase()])) this.register(v.kind, spelling);
+    }
+    // They go in the table too, so that a session's placeholders still read back once an address
+    // has changed or a name is no longer listed.
+    if (this.on && this.persist) {
+      const fresh = Object.fromEntries([...this.fromPlaceholder].filter(([placeholder, text]) => o.table?.[placeholder] !== text));
+      if (Object.keys(fresh).length) this.persist(fresh);
     }
     for (const [placeholder, text] of Object.entries(o.table ?? {})) {
       if (PLACEHOLDER.test(placeholder) && !this.fromPlaceholder.has(placeholder)) this.fromPlaceholder.set(placeholder, text);
@@ -229,15 +285,59 @@ export class Redactor {
     return s.replace(RESTORE, (m) => this.fromPlaceholder.get(m) ?? m);
   }
 
-  /** A JSON line for the server, its base64 data left as it is. */
+  /**
+   * A JSON line for the server: its strings filtered, while the format around them stays as it is,
+   * field names, protocol words, numbers and booleans, and base64 data. Not JSON, it's text.
+   */
   jsonLine(line: string): string {
     if (!this.forward || !this.probe!.test(line)) return line;
-    if (!BINARY.test(line)) return this.text(line);
+    let value: unknown;
     try {
-      return JSON.stringify(this.walk(JSON.parse(line)));
+      value = JSON.parse(line);
     } catch {
       return this.text(line);
     }
+    return JSON.stringify(this.walk(value));
+  }
+
+  /** A string that may hold JSON, such as a `--settings` value: an object or a list as JSON, anything else as text. */
+  value(s: string): string {
+    if (!this.forward || !this.probe!.test(s)) return s;
+    if (/^\s*[[{]/.test(s)) {
+      try {
+        return JSON.stringify(this.walk(JSON.parse(s)));
+      } catch {}
+    }
+    return this.text(s);
+  }
+
+  /**
+   * claude's arguments for the server: the flags as they are, and so the values of those that take
+   * a word of claude's (a model, a format); every other value filtered, JSON as JSON.
+   */
+  args(args: string[]): string[] {
+    if (!this.forward) return args;
+    return args.map((a, i) => {
+      if (FLAG.test(a)) {
+        const eq = a.indexOf("=");
+        return eq < 0 || WORD_FLAGS.has(a.slice(0, eq)) ? a : a.slice(0, eq + 1) + this.value(a.slice(eq + 1));
+      }
+      return WORD_FLAGS.has(args[i - 1] ?? "") ? a : this.value(a);
+    });
+  }
+
+  /** A file's bytes for the server: JSON (by its name) as JSON, other text as text, binary data as it is. */
+  file(path: string, data: Uint8Array): Uint8Array {
+    if (!this.forward) return data;
+    if (!/\.json$/i.test(path)) return this.bytes(data);
+    return viaText(data, (s) => {
+      if (!this.probe!.test(s)) return s;
+      try {
+        return `${JSON.stringify(this.walk(JSON.parse(s)), null, 2)}${s.endsWith("\n") ? "\n" : ""}`;
+      } catch {
+        return this.text(s);
+      }
+    });
   }
 
   /** Text bytes for the server; binary data passes unchanged. */
@@ -257,7 +357,29 @@ export class Redactor {
 
   /** A filter for a byte stream, a line at a time. */
   lines(direction: "redact" | "restore"): Lines {
-    return new Lines(direction === "redact" ? (b) => this.bytes(b) : (b) => this.restoreBytes(b));
+    return new Lines(direction === "redact" ? (b) => this.bytes(b) : (b) => this.restoreBytes(b), undefined, this.cutter(direction));
+  }
+
+  /**
+   * Where a long piece of text may be cut, going out or coming back: far enough from its end that a
+   * value (a placeholder) starting there is whole, and before one that would be split.
+   */
+  private cutter(direction: "redact" | "restore"): ((s: string) => number) | undefined {
+    const re = direction === "redact" ? this.forward : RESTORE;
+    if (!re) return undefined;
+    const hold = (direction === "redact" ? this.longest : PLACEHOLDER_MAX) + 2;
+    return (s) => {
+      let cut = Math.max(0, s.length - hold);
+      for (const m of s.matchAll(re)) {
+        const at = m.index ?? 0;
+        if (at >= cut) break;
+        if (at + m[0].length > cut) {
+          cut = at;
+          break;
+        }
+      }
+      return cut;
+    };
   }
 
   /** The same, as a Node stream. */
@@ -321,15 +443,17 @@ export class Redactor {
     };
   }
 
-  private walk(v: unknown): unknown {
-    if (typeof v === "string") return this.text(v);
+  /** A JSON value with its strings filtered, except protocol words, field names and base64 data. */
+  private walk(v: unknown, field?: string): unknown {
+    if (typeof v === "string") return field !== undefined && PROTOCOL.has(field) ? v : this.text(v);
     if (Array.isArray(v)) return v.map((x) => this.walk(x));
     if (!v || typeof v !== "object") return v;
     const o = v as Record<string, unknown>;
     const binary = o.type === "base64" || o.type === "image" || "mimeType" in o || "media_type" in o;
-    const out: Record<string, unknown> = {};
-    for (const [k, x] of Object.entries(o)) out[this.text(k)] = binary && k === "data" && typeof x === "string" ? x : this.walk(x);
-    return out;
+    return Object.fromEntries(Object.entries(o).map(([k, x]) => [
+      FIELD.test(k) ? k : this.text(k),
+      binary && k === "data" && typeof x === "string" ? x : this.walk(x, k),
+    ]));
   }
 
   private placeholder(kind: Kind, text: string): string {

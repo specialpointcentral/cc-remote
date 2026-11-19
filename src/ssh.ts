@@ -93,7 +93,8 @@ export const hostDir = (cwd: string) => `.cc-remote/ws/${hostname()}${posix(cwd)
 
 /** Enters a stable per-directory folder on the host, so sessions and --continue have a home. */
 const enter = (cwd: string) => {
-  const dir = `"$HOME"/${quote(hostDir(cwd))}`;
+  // Under redaction its name has placeholders, as the host sees it.
+  const dir = `"$HOME"/${quote(redaction().text(hostDir(cwd)))}`;
   return `mkdir -p ${dir} && cd ${dir}`;
 };
 
@@ -103,13 +104,15 @@ export type RelayStart = { id: string; sessionId?: string; grace: number; idle: 
 /**
  * The shell command the host runs: enter the folder, run `check` when given, then exec claude.
  * With `relay`, claude starts under the relay when the check found a python3 for it ($py).
- * Under redaction (redact.ts) this machine's values in it, the folder's name among them, are
- * placeholders, and claude doesn't get the ssh session's variables, which hold this machine's address.
+ * Under redaction (redact.ts) this machine's values in claude's arguments, in the variables' values
+ * and in the folder's name are placeholders, while the command around them stays as it is; and
+ * claude doesn't get the ssh session's variables, which hold this machine's address.
  */
 export function remoteCommand(args: string[], env: Record<string, string>, cwd: string, check?: string, relay?: RelayStart): string {
   const r = redaction();
-  const scrub = r.on ? "unset SSH_CONNECTION SSH_CLIENT SSH_TTY; " : "";
-  return r.text(`${scrub}${plainCommand(args, env, cwd, check, relay)}`);
+  if (!r.on) return plainCommand(args, env, cwd, check, relay);
+  const vars = Object.fromEntries(Object.entries(env).map(([k, v]) => [k, r.value(v)]));
+  return `unset SSH_CONNECTION SSH_CLIENT SSH_TTY; ${plainCommand(r.args(args), vars, cwd, check, relay)}`;
 }
 
 function plainCommand(args: string[], env: Record<string, string>, cwd: string, check?: string, relay?: RelayStart): string {
@@ -160,10 +163,16 @@ export async function checkSharedConnection(host: string): Promise<void> {
   }
 }
 
-/** Runs claude on the host with these arguments, for `cc-remote --cli`. */
+/**
+ * Runs claude on the host with these arguments, for `cc-remote --cli`. Its terminal is the host's:
+ * redaction covers the command that starts it, not what is typed or pasted, or what claude shows.
+ */
 export function runRemote(host: string, args: string[], cwd: string): Promise<number> {
   const [ssh, ...flags] = rsh();
   const tty = process.stdin.isTTY && process.stdout.isTTY ? "-t" : "-T";
+  if (process.stdin.isTTY && redaction().on) {
+    process.stderr.write("cc-remote: redaction doesn't cover --cli: what you type or paste goes to the server as it is, and what claude shows comes back unrestored\n");
+  }
   const child = spawn(ssh!, [...flags, tty, host, remoteCommand(args, {}, cwd)], { stdio: "inherit" });
   return new Promise((done) => child.on("exit", (code) => done(code ?? 1)));
 }
@@ -293,13 +302,15 @@ export function launch(
   host: string, cwd: string, args: string[], env: Record<string, string>, uploads: Upload[] = [], signal?: AbortSignal,
   found?: (where: Ready, exec?: Exec, watches?: WatchLink) => void, hostHooks?: Record<string, unknown[]>,
 ): HostProcess {
-  const needs: Need[] = uploads.map((u) => ({ kind: "plugin", ...u }));
+  const r = redaction();
+  // Under redaction a plugin's file names and contents go with placeholders, as a project's do.
+  const files = r.on ? { path: (p: string) => r.text(p), data: (p: string, d: Uint8Array) => r.file(p, d) } : undefined;
+  const needs: Need[] = uploads.map((u) => ({ kind: "plugin", ...u, redact: files }));
   const grace = reconnectGrace();
   const stream = argument(args, "--input-format") === "stream-json";
   if (stream && !grace) notice("reconnection is off (CC_REMOTE_RECONNECT_GRACE=0): a dropped connection ends the session's claude");
   const relayed = stream && grace > 0;
   if (relayed) needs.push({ kind: "relay", remote: RELAY_PATH, data: RELAY_SOURCE });
-  const r = redaction();
   const resume = argument(args, "--resume", "-r");
   const transcript = resume ? localTranscript(resume, cwd) : undefined;
   if (resume && transcript) needs.push({ kind: "transcript", local: transcript, sessionId: resume, filter: r.on ? (b) => r.jsonLines(b) : undefined });
@@ -335,7 +346,7 @@ export function launch(
       if (project.skipped.length && missing.some((i) => needs[i]!.kind === "project")) {
         console.error(`cc-remote: not copying to the host: ${project.skipped.join(", ")}`);
       }
-      return { argv: [...ssh(shared), r.text(`${enter(cwd)} && ${installScript(needs, missing)}`)], input: bundle(needs, missing) };
+      return { argv: [...ssh(shared), `${enter(cwd)} && ${installScript(needs, missing)}`], input: bundle(needs, missing) };
     },
     tokens,
     ready: (rest) => {
@@ -357,7 +368,7 @@ function redactedTrees(cwd: string): ReturnType<typeof projectTrees> {
   const r = redaction();
   const project = projectTrees(cwd);
   if (!r.on || !project.files.length) return project;
-  const files = project.files.map((f) => ({ ...f, path: r.text(f.path), data: r.bytes(f.data) }));
+  const files = project.files.map((f) => ({ ...f, path: r.text(f.path), data: r.file(f.path, f.data) }));
   return { files, skipped: project.skipped, stamp: stamp(files) };
 }
 

@@ -4,7 +4,8 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSyn
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { ensureKey, kindOf, Lines, loadRedactor, machineValues, nameProblem, readConfig, Redactor, RedactionError, resetRedaction, type Value } from "../src/redact";
-import { remoteCommand, spawner } from "../src/ssh";
+import { launch, remoteCommand, spawner } from "../src/ssh";
+import { hostLaunch } from "../src/args";
 import { workspace } from "../src/tools/util";
 import { fakeHost } from "./fakehost";
 import { isolate } from "./fixture";
@@ -87,10 +88,24 @@ describe("Redactor", () => {
   test("a new spelling is kept, so another process restores it", () => {
     const kept: Record<string, string> = {};
     const r = make({ persist: (e) => Object.assign(kept, e) });
+    const known = Object.keys(kept).length;
     const out = r.text("DevBox-7 alice");
-    expect(Object.values(kept)).toEqual(["DevBox-7"]);
+    expect(Object.values(kept).slice(known)).toEqual(["DevBox-7"]);
     const later = new Redactor(KEY, VALUES, { on: true, table: kept });
     expect(later.restore(out)).toBe("DevBox-7 alice");
+  });
+
+  test("its values are kept from the start: an address that changed, or a name no longer listed, still reads back", () => {
+    const kept: Record<string, string> = {};
+    const first = new Redactor(KEY, [{ kind: "ip", text: "10.0.0.5" }, { kind: "name", text: "falcon" }], { on: true, persist: (e) => Object.assign(kept, e) });
+    const out = first.text("from 10.0.0.5 on falcon");
+    // Started again on another network, the name no longer listed.
+    const later = new Redactor(KEY, [{ kind: "ip", text: "10.9.9.9" }], { on: true, table: { ...kept }, persist: (e) => Object.assign(kept, e) });
+    expect(later.restore(out)).toBe("from 10.0.0.5 on falcon");
+    // Once they are all in the table, a start writes nothing.
+    let writes = 0;
+    new Redactor(KEY, [{ kind: "ip", text: "10.9.9.9" }], { on: true, table: { ...kept }, persist: () => writes++ });
+    expect(writes).toBe(0);
   });
 
   test("off, it replaces nothing but still restores", () => {
@@ -116,8 +131,42 @@ describe("Redactor", () => {
     expect(m.message.content[1].data).toBe(data);
     expect(m.message.content[2].text).toMatch(/^on ccr-host-[0-9a-f]{8}$/);
     expect(Object.keys(m)).toEqual(["type", "message", r.text("devbox-7")]);
-    // Without base64 the line is replaced as text, which keeps it byte for byte otherwise.
-    expect(r.jsonLine('{"a": "devbox-7",  "b":1}')).toBe(`{"a": "${r.text("devbox-7")}",  "b":1}`);
+    expect(JSON.parse(r.jsonLine('{"a": "devbox-7",  "b":1}'))).toEqual({ a: r.text("devbox-7"), b: 1 });
+    // Not JSON, it is text.
+    expect(r.jsonLine("devbox-7 {")).toBe(`${r.text("devbox-7")} {`);
+  });
+
+  test("JSON keeps its format whatever the names: field names, protocol words, numbers and booleans", () => {
+    const names = ["user", "true", "text", "model", "type"].map((text) => ({ kind: "name" as const, text }));
+    const r = new Redactor(KEY, names, { on: true });
+    const line = JSON.stringify({
+      type: "user", message: { role: "user", model: "model", content: [{ type: "text", text: "a user said true" }] },
+      isSidechain: true, n: 1, "/home/user/x": "y",
+    });
+    const sent = JSON.parse(r.jsonLine(line));
+    expect(sent.type).toBe("user");
+    expect(sent.message.role).toBe("user");
+    expect(sent.message.model).toBe("model");
+    expect(sent.message.content[0].type).toBe("text");
+    expect(sent.message.content[0].text).toMatch(/^a ccr-name-[0-9a-f]{8} said ccr-name-[0-9a-f]{8}$/);
+    expect(sent.isSidechain).toBe(true);
+    expect(sent.n).toBe(1);
+    // A key that isn't a field's name is data.
+    expect(Object.keys(sent)).toContain(`/home/${r.text("user")}/x`);
+    // So is a JSON file, and a JSON value.
+    const file = new TextDecoder().decode(r.file("a/plugin.json", new TextEncoder().encode('{"name": "user", "strict": true}\n')));
+    expect(JSON.parse(file)).toEqual({ name: r.text("user"), strict: true });
+    expect(JSON.parse(r.value('{"fastMode":true,"note":"user"}'))).toEqual({ fastMode: true, note: r.text("user") });
+    expect(r.value("user")).toBe(r.text("user"));
+  });
+
+  test("claude's arguments: flags and their words stay, values are filtered, JSON as JSON", () => {
+    const names = ["sonnet", "false", "falcon"].map((text) => ({ kind: "name" as const, text }));
+    const r = new Redactor(KEY, names, { on: true });
+    const args = r.args(["--model", "sonnet", "--settings", '{"fastMode":false,"x":"falcon"}', "--append-system-prompt=work on falcon", "--output-format=sonnet", "-p", "falcon"]);
+    expect(args.slice(0, 3)).toEqual(["--model", "sonnet", "--settings"]);
+    expect(JSON.parse(args[3]!)).toEqual({ fastMode: false, x: r.text("falcon") });
+    expect(args.slice(4)).toEqual([`--append-system-prompt=work on ${r.text("falcon")}`, "--output-format=sonnet", "-p", r.text("falcon")]);
   });
 
   test("bytes: text is filtered, binary data passes", () => {
@@ -143,6 +192,29 @@ describe("Redactor", () => {
     // A line longer than the limit goes in pieces.
     const small = new Lines((b) => b, 4);
     expect(dec(small.push(enc("abcdef")))).toBe("abcdef");
+  });
+
+  test("a long line goes in pieces that split neither a value nor a character, either way", () => {
+    const r = make();
+    const enc = (s: string) => new TextEncoder().encode(s);
+    const dec = (b: Uint8Array) => new TextDecoder("utf-8", { fatal: true }).decode(b);
+    const run = (lines: Lines, text: string, size: number) => {
+      const bytes = enc(text);
+      const out: Uint8Array[] = [];
+      for (let i = 0; i < bytes.length; i += size) out.push(lines.push(bytes.subarray(i, i + size)));
+      out.push(lines.flush());
+      return dec(Buffer.concat(out));
+    };
+    // Values at many places around the first cut, in two-byte characters that a byte count splits.
+    for (const pad of [32_700, 32_760, 32_764, 32_766, 32_770]) {
+      const text = `${"é".repeat(pad)} devbox-7 alice 10.20.30.40 ${"é".repeat(40_000)}`;
+      for (const size of [4_093, 65_537]) {
+        const sent = run(r.lines("redact"), text, size);
+        expect(sent).not.toMatch(REAL);
+        expect(sent).toBe(r.text(text));
+        expect(run(r.lines("restore"), sent, size)).toBe(text);
+      }
+    }
   });
 
   test("streamed deltas: a placeholder split between deltas is restored whole, and the rest goes at the block's stop", () => {
@@ -274,10 +346,52 @@ describe("the wire", () => {
   const tree = (root: string): string[] => existsSync(root) ? readdirSync(root, { recursive: true }).map(String) : [];
 
   test("the remote command has placeholders and drops the ssh session's address", () => {
-    const command = remoteCommand(["--model", "falcon-1"], {}, "/work/falcon");
+    const command = remoteCommand(["--append-system-prompt", "work on falcon-1"], { NOTE: "falcon" }, "/work/falcon");
     expect(command).toStartWith("unset SSH_CONNECTION SSH_CLIENT SSH_TTY; ");
     expect(command).not.toMatch(real);
   });
+
+  test("only the data in the remote command is replaced: its own words, flags, a model and JSON booleans stay", () => {
+    const words = ["exec", "env", "claude", "false", "sonnet", "mkdir"].map((text) => ({ kind: "name" as const, text }));
+    resetRedaction(new Redactor(KEY, [...values, ...words], { on: true }));
+    try {
+      const command = remoteCommand(["--model", "sonnet", "--settings", '{"fastMode":false}', "--append-system-prompt", "claude, run env"], {}, "/work");
+      expect(command).toContain(`mkdir -p "$HOME"/`);
+      expect(command).toContain(`exec env  claude '--model' 'sonnet' '--settings' '{"fastMode":false}' '--append-system-prompt' 'ccr-name-`);
+      expect(command).not.toContain("claude, run env");
+    } finally {
+      resetRedaction(new Redactor(KEY, values, { on: true }));
+    }
+  });
+
+  test("a plugin goes over filtered: its folder's name, its files' names and contents, JSON as JSON", async () => {
+    const project = join(realpathSync(iso.home), "plugin-app");
+    const plugin = join(realpathSync(iso.home), "falcon-tools");
+    mkdirSync(project, { recursive: true });
+    mkdirSync(join(plugin, ".claude-plugin"), { recursive: true });
+    mkdirSync(join(plugin, "commands"), { recursive: true });
+    writeFileSync(join(plugin, ".claude-plugin", "plugin.json"), JSON.stringify({ name: "falcon-tools", strict: false }, null, 2));
+    writeFileSync(join(plugin, "commands", "falcon.md"), "Ship falcon.\n");
+    // As `cc-remote claude` starts it, for Orca: its --plugin-dir goes to the host.
+    const abort = new AbortController();
+    const plan = hostLaunch(["--input-format", "stream-json", "--plugin-dir", plugin], project, true);
+    expect(plan.uploads[0]!.remote).not.toMatch(real);
+    const child = launch("box", project, plan.args, {}, plan.uploads, abort.signal);
+    const plugins = join(host.home, ".cc-remote", "plugins");
+    for (let i = 0; i < 400 && !tree(plugins).some((f) => f.endsWith(".md")); i++) await Bun.sleep(25);
+    const files = tree(plugins);
+    expect(files.some((f) => f.endsWith(".md"))).toBe(true);
+    for (const f of files) {
+      expect(f).not.toMatch(real);
+      if (statSync(join(plugins, f)).isFile()) expect(readFileSync(join(plugins, f), "utf8")).not.toMatch(real);
+    }
+    const manifest = JSON.parse(readFileSync(join(plugins, files.find((f) => f.endsWith("plugin.json"))!), "utf8"));
+    expect(manifest).toEqual({ name: expect.stringMatching(/^ccr-name-[0-9a-f]{8}-tools$/), strict: false });
+    for (const call of host.calls()) expect(call).not.toMatch(real);
+    const exited = new Promise((done) => child.once("exit", done));
+    abort.abort();
+    await exited;
+  }, 30_000);
 
   test("a stream session: claude, its folder and the commands see placeholders; the SDK sees the real values", async () => {
     const project = join(realpathSync(iso.home), "falcon-app");

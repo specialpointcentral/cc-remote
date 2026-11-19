@@ -2,6 +2,7 @@ import type { McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { basename, extname, join, resolve } from "node:path";
 import { hostTools, keepsMonitor, PREFIX, READS } from "./names";
+import { redaction } from "./redact";
 import { hostDir, reconnectGrace, type Upload } from "./ssh";
 
 /** Flags that take several values; as in claude's parser, the values run up to the next flag. */
@@ -31,9 +32,15 @@ export type HostLaunch = {
 
 /**
  * A name for a local plugin (a directory, or a .zip) on the host that changes whenever its files
- * do, so a copy already there is a current one.
+ * do, so a copy already there is a current one. Under redaction it has placeholders, and it
+ * differs from the name without, as the copy does.
  */
 function fingerprint(path: string): string {
+  const r = redaction();
+  return r.on ? r.text(plainFingerprint(path, "\nredacted")) : plainFingerprint(path);
+}
+
+function plainFingerprint(path: string, salt = ""): string {
   const info = statSync(path);
   const files = info.isDirectory()
     ? readdirSync(path, { recursive: true, encoding: "utf8" }).sort().map((f) => {
@@ -42,7 +49,7 @@ function fingerprint(path: string): string {
       })
     : [`:${info.size}:${info.mtimeMs}`];
   const ext = info.isDirectory() ? "" : extname(path);
-  return `${basename(path, ext).replace(/[^\w.-]/g, "_")}-${Bun.hash(`${path}\n${files.join("\n")}`).toString(36)}${ext}`;
+  return `${basename(path, ext).replace(/[^\w.-]/g, "_")}-${Bun.hash(`${path}\n${files.join("\n")}${salt}`).toString(36)}${ext}`;
 }
 
 const isJson = (value: string) => /^\s*[{[]/.test(value);

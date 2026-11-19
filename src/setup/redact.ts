@@ -88,8 +88,8 @@ export async function setupRedaction(ctx: Ctx, check: Check): Promise<void> {
     const { values } = machineValues();
     ctx.progress.say(`        ${t(`This machine's identifiers: ${describe(values)}.`, `本机标识：${describe(values)}。`)}`);
     const on = await ctx.prompt.yesNo(t(
-      "Replace them with placeholders in everything sent to the central server (claude's stream, commands, uploads), and restore them here?",
-      "在发往中心服务器的所有内容（claude 的消息、命令、上传）里把它们换成占位符，回到本机时再还原？",
+      "Replace them with placeholders in everything sent to the central server (claude's stream, commands, uploads; not the terminal of `cc-remote --cli`), and restore them here?",
+      "在发往中心服务器的所有内容（claude 的消息、命令、上传；不含 `cc-remote --cli` 的终端）里把它们换成占位符，回到本机时再还原？",
     ), false);
     let names: string[] = [];
     if (on) {

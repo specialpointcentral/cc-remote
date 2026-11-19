@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
-import { copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { activate, type Fs, installed, layout, realFs } from "../src/install/layout";
@@ -214,6 +214,28 @@ describe("cc-remote update", () => {
     expect(out).toContain("nor switch back (rename refused)");
     expect(out).not.toContain("Nothing was switched");
     expect(current(h)).toBe("0.2.0");
+  });
+
+  test("an old version that can't be removed is told, and the update still counts as done", async () => {
+    if (process.getuid?.() === 0) return; // Permissions don't stop root.
+    release("0.3.0");
+    const h = home(["0.2.0", "0.1.0"]);
+    // A folder in 0.1.0 that can't be emptied: removing 0.1.0 fails.
+    const stuck = join(h.l.versions, "0.1.0", "stuck");
+    mkdirSync(stuck);
+    writeFileSync(join(stuck, "file"), "x");
+    chmodSync(stuck, 0o500);
+    try {
+      const r = await update(h);
+      expect(r.code).toBe(0);
+      expect(r.out).toContain("kept 0.1.0: could not remove it");
+      expect(r.out).toContain("Updated 0.2.0 → 0.3.0.");
+      expect(r.out).not.toContain("Nothing was switched");
+      expect(current(h)).toBe("0.3.0");
+      expect(install(h)).toMatchObject({ current: "0.3.0", previous: "0.2.0" });
+    } finally {
+      chmodSync(stuck, 0o700);
+    }
   });
 
   test("a checksum mismatch aborts: nothing downloaded is kept, nothing switched", async () => {

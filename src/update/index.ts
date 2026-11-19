@@ -110,7 +110,10 @@ async function sane(bin: string, version: string, env: Record<string, string | u
   return { ok: code === 0 && out.trimStart().startsWith(`${version} (cc-remote`), out: out.trim().slice(0, 300) };
 }
 
-/** Removes versions that are neither current nor previous and that nothing runs any more. */
+/**
+ * Removes versions that are neither current nor previous and that nothing runs any more. The
+ * switch is done by then: a version that can't be removed is only said, not an error.
+ */
 function cleanup(l: Layout, keep: string[], say: (s: string) => void, platform: NodeJS.Platform, fs: Fs) {
   let names: string[] = [];
   try {
@@ -120,8 +123,13 @@ function cleanup(l: Layout, keep: string[], say: (s: string) => void, platform: 
     if (keep.includes(name)) continue;
     const dir = join(l.versions, name);
     const used = inUse(dir, platform);
-    if (used === false) rmSync(dir, { recursive: true, force: true });
-    else if (VERSION.test(name)) say(used ? t(`  kept ${name}: still running`, `  保留 ${name}：仍在运行`) : t(`  kept ${name}: can't tell whether it still runs`, `  保留 ${name}：无法判断是否仍在运行`));
+    if (used === false) {
+      try {
+        rmSync(dir, { recursive: true, force: true });
+      } catch (e) {
+        say(t(`  kept ${name}: could not remove it (${(e as Error).message})`, `  保留 ${name}：无法删除（${(e as Error).message}）`));
+      }
+    } else if (VERSION.test(name)) say(used ? t(`  kept ${name}: still running`, `  保留 ${name}：仍在运行`) : t(`  kept ${name}: can't tell whether it still runs`, `  保留 ${name}：无法判断是否仍在运行`));
   }
   if (l.windows) {
     for (const file of asideFiles(l, safeList(dirname(l.stable)))) {

@@ -33,11 +33,11 @@ export type HostLaunch = {
 /**
  * A name for a local plugin (a directory, or a .zip) on the host that changes whenever its files
  * do, so a copy already there is a current one. Under redaction it has placeholders, and it
- * differs from the name without, as the copy does.
+ * changes with what redaction replaces, as the filtered copy does.
  */
 function fingerprint(path: string): string {
   const r = redaction();
-  return r.on ? r.text(plainFingerprint(path, "\nredacted")) : plainFingerprint(path);
+  return r.on ? r.text(plainFingerprint(path, `\nredacted ${r.stamp}`)) : plainFingerprint(path);
 }
 
 function plainFingerprint(path: string, salt = ""): string {

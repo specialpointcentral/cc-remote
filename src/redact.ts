@@ -76,17 +76,29 @@ const RESTORE = new RegExp(KINDS.map((k) => `${EDGES[k][0]}ccr-${k}-[0-9a-f]{8,1
 const PLACEHOLDER = /^ccr-[a-z0-9]+-[0-9a-f]{8,16}(?:\.invalid)?$/;
 
 /**
- * Fields whose string values are words of claude's protocol, never this machine's: a message's type
- * and role, a model, a permission mode. A listed name that happens to be such a word stays there.
+ * Fields whose string values, in a message's envelope, are words of claude's protocol and never
+ * this machine's: a message's type and role, a model, a permission mode, a JSON-RPC method. A listed
+ * name that happens to be such a word stays there. Inside DATA they are data like any other field.
  */
-const PROTOCOL = new Set(["type", "subtype", "role", "model", "stop_reason", "behavior", "mode", "permissionMode", "hook_event_name"]);
+const PROTOCOL = new Set(["type", "subtype", "role", "model", "stop_reason", "behavior", "mode", "permissionMode", "hook_event_name", "method", "apiKeySource"]);
+/**
+ * Fields holding data of any shape rather than more of the envelope: a tool's input (as asked, or
+ * as a permission answer changes it), a JSON-RPC call's parameters, a tool's result as a
+ * transcript keeps it, metadata.
+ */
+const DATA = new Set(["input", "updatedInput", "updated_input", "tool_input", "arguments", "params", "toolUseResult", "tool_use_result", "metadata", "_meta", "structuredContent"]);
 /** A key that is a plain identifier names a field, part of the format; any other (a path, a host) is data. */
 const FIELD = /^[A-Za-z_][A-Za-z0-9_]*$/;
-/** Flags whose value is a word of claude's, such as a model or a format, rather than data. */
-const WORD_FLAGS = new Set(["--model", "--fallback-model", "--permission-mode", "--input-format", "--output-format", "--setting-sources", "--effort"]);
+/**
+ * Flags whose value stays as it is: a word of claude's, such as a model or a format, or a path on
+ * the host that cc-remote made, placeholders and all, such as a plugin's.
+ */
+const KEPT_FLAGS = new Set(["--model", "--fallback-model", "--permission-mode", "--input-format", "--output-format", "--setting-sources", "--effort", "--plugin-dir", "--plugin-dir-no-mcp"]);
 const FLAG = /^--?[A-Za-z][A-Za-z0-9-]*(?:=|$)/;
 /** Longer than any placeholder, `ccr-name-` and 16 hex digits and `.invalid`. */
 const PLACEHOLDER_MAX = 40;
+/** How much of what went before a part of a long line is read with it, for the edges of its first values. */
+const CONTEXT = 32;
 
 const strict = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 const encoder = new TextEncoder();
@@ -142,78 +154,170 @@ function holdFrom(text: string): number {
   return cut;
 }
 
+type JsonString = { t: "string"; start: number; end: number; value: string };
+type Json = JsonString | { t: "object"; entries: [JsonString, Json][] } | { t: "array"; items: Json[] } | { t: "literal" };
+const LITERAL = /-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?|true|false|null/y;
+
+/**
+ * A JSON text's structure, with where each string is. Numbers stay text, so one too big for a
+ * JavaScript number is never rounded. Throws when it isn't JSON.
+ */
+function parseJson(s: string): Json {
+  let i = 0;
+  const fail = (): never => {
+    throw new SyntaxError(`not JSON at ${i}`);
+  };
+  const space = () => {
+    while (s[i] === " " || s[i] === "\t" || s[i] === "\n" || s[i] === "\r") i++;
+  };
+  const string = (): JsonString => {
+    const start = i++;
+    for (;;) {
+      if (i >= s.length) fail();
+      const c = s.charCodeAt(i);
+      if (c === 0x22) break;
+      if (c < 0x20) fail();
+      i += c === 0x5c ? 2 : 1;
+    }
+    i++;
+    return { t: "string", start, end: i, value: JSON.parse(s.slice(start, i)) as string };
+  };
+  const value = (): Json => {
+    space();
+    const open = s[i];
+    if (open === '"') return string();
+    if (open === "{" || open === "[") {
+      const close = open === "{" ? "}" : "]";
+      const entries: [JsonString, Json][] = [];
+      const items: Json[] = [];
+      i++;
+      space();
+      if (s[i] === close) i++;
+      else {
+        for (;;) {
+          if (open === "{") {
+            space();
+            if (s[i] !== '"') fail();
+            const key = string();
+            space();
+            if (s[i++] !== ":") fail();
+            entries.push([key, value()]);
+          } else items.push(value());
+          space();
+          const next = s[i++];
+          if (next === close) break;
+          if (next !== ",") fail();
+        }
+      }
+      return open === "{" ? { t: "object", entries } : { t: "array", items };
+    }
+    LITERAL.lastIndex = i;
+    if (!LITERAL.test(s)) fail();
+    i = LITERAL.lastIndex;
+    return { t: "literal" };
+  };
+  const root = value();
+  space();
+  if (i < s.length) fail();
+  return root;
+}
+
+/**
+ * Filters a part of a long line: `text`, read after `context`, the end of what went before it, so
+ * that a value's edges are judged as in the whole line. Gives the part's filtered text, and how
+ * much of `text` that is: all of it when `last`, else only as far as no value could go on past it.
+ */
+export type PieceFilter = (context: string, text: string, last: boolean) => { out: string; used: number };
+
 /**
  * Applies a filter to a byte stream a line at a time, so a value is never split between two
- * chunks. A line longer than `max` goes in pieces: each ends on a whole character, which the
- * filter needs to read it as text, and where `cut` says no value is split.
+ * chunks. A line longer than `max` goes in parts, which `piece` filters each after what went
+ * before; a part ends on a whole character, which a filter needs to read it as text.
  */
 export class Lines {
   private held: Uint8Array[] = [];
   private size = 0;
-  constructor(private readonly f: (b: Uint8Array) => Uint8Array, private readonly max = 64 * 1024, private readonly cut?: (s: string) => number) {}
+  /** The end of the current line's parts already filtered, while it has some. */
+  private context = "";
+  constructor(private readonly f: (b: Uint8Array) => Uint8Array, private readonly max = 64 * 1024, private readonly piece?: PieceFilter) {}
 
   push(chunk: Uint8Array): Uint8Array {
     const nl = chunk.lastIndexOf(10);
     if (nl < 0) {
       this.hold(chunk);
-      return this.size > this.max ? this.piece() : EMPTY;
+      return this.size > this.max ? this.part() : EMPTY;
     }
-    const out = this.f(Buffer.concat([...this.held, chunk.subarray(0, nl + 1)]));
-    this.held = [];
-    this.size = 0;
-    if (nl + 1 < chunk.length) this.hold(chunk.subarray(nl + 1));
+    const out = this.rest(Buffer.concat([...this.held, chunk.subarray(0, nl + 1)]));
+    this.keep(chunk.subarray(nl + 1));
     return out;
   }
 
   flush(): Uint8Array {
-    if (!this.size) return EMPTY;
     const all = Buffer.concat(this.held);
-    this.held = [];
-    this.size = 0;
-    return this.f(all);
+    this.keep(EMPTY);
+    return this.rest(all);
   }
 
-  /** The front of a long line, as far as it can go; the rest waits for more. */
-  private piece(): Uint8Array {
+  /** The rest of a line (and whole lines after it), read after its parts already filtered. */
+  private rest(b: Uint8Array): Uint8Array {
+    const context = this.context;
+    this.context = "";
+    if (!b.length) return EMPTY;
+    if (!context || !this.piece) return this.f(b);
+    let s: string;
+    try {
+      s = strict.decode(b);
+    } catch {
+      return this.f(b);
+    }
+    return encoder.encode(this.piece(context, s, true).out);
+  }
+
+  /** A long line's next part: whole characters, as far as the filter can go; the rest waits for more. */
+  private part(): Uint8Array {
     const all = Buffer.concat(this.held);
-    const end = safeEnd(all, this.cut);
-    this.held = end < all.length ? [all.slice(end)] : [];
-    this.size = all.length - end;
-    return end ? this.f(all.subarray(0, end)) : EMPTY;
+    const end = wholeChars(all);
+    let s: string;
+    try {
+      s = strict.decode(all.subarray(0, end));
+    } catch {
+      // Not text: it passes as it is.
+      this.keep(EMPTY);
+      this.context = "";
+      return this.f(all);
+    }
+    if (!this.piece) {
+      this.keep(all.subarray(end));
+      return this.f(all.subarray(0, end));
+    }
+    const { out, used } = this.piece(this.context, s, false);
+    this.context = (this.context + s.slice(0, used)).slice(-CONTEXT);
+    this.keep(Buffer.concat([encoder.encode(s.slice(used)), all.subarray(end)]));
+    return encoder.encode(out);
   }
 
   private hold(b: Uint8Array) {
     this.held.push(b.slice());
     this.size += b.length;
   }
+
+  private keep(b: Uint8Array) {
+    this.held = b.length ? [b.slice()] : [];
+    this.size = b.length;
+  }
 }
 
-/**
- * How much of `b` can be filtered now: whole characters only (a character `b` ends inside of waits
- * for its other bytes), and no further than `cut` says. All of it when it isn't text, which a
- * filter passes as it is.
- */
-function safeEnd(b: Uint8Array, cut?: (s: string) => number): number {
-  let end = b.length;
+/** How many of the bytes are whole UTF-8 characters: a character they end inside of waits for its other bytes. */
+function wholeChars(b: Uint8Array): number {
   for (let i = b.length - 1; i >= 0 && i >= b.length - 4; i--) {
     const x = b[i]!;
     if (x < 0x80) break;
-    if (x >= 0xc0) {
-      if (b.length - i < (x >= 0xf0 ? 4 : x >= 0xe0 ? 3 : 2)) end = i;
-      break;
-    }
+    if (x >= 0xc0) return b.length - i < (x >= 0xf0 ? 4 : x >= 0xe0 ? 3 : 2) ? i : b.length;
   }
-  let s: string;
-  try {
-    s = strict.decode(b.subarray(0, end));
-  } catch {
-    return b.length;
-  }
-  if (!cut) return end;
-  let c = cut(s);
-  if (c > 0 && c < s.length && s.charCodeAt(c - 1) >= 0xd800 && s.charCodeAt(c - 1) <= 0xdbff) c--;
-  return Buffer.byteLength(s.slice(0, c));
+  return b.length;
 }
+
+const highSurrogate = (c: number) => c >= 0xd800 && c <= 0xdbff;
 
 export type RedactorOptions = {
   /** Whether to replace values in what goes out; restoring works whenever there is a key. */
@@ -268,6 +372,15 @@ export class Redactor {
     }
   }
 
+  /**
+   * A name for what it replaces, which changes whenever any of it does: copies on the host filtered
+   * with it, such as a plugin's, are named with it, so another filter makes another copy.
+   */
+  get stamp(): string {
+    const all = this.values.map((v) => `${v.kind}\0${v.text}`).sort().join("\n");
+    return createHmac("sha256", this.key).update(`stamp\0${all}`).digest("hex").slice(0, 16);
+  }
+
   /** Whether anything passes through it changed: it replaces, or it has placeholders to restore. */
   get active(): boolean {
     return this.forward !== undefined || this.fromPlaceholder.size > 0;
@@ -285,19 +398,14 @@ export class Redactor {
     return s.replace(RESTORE, (m) => this.fromPlaceholder.get(m) ?? m);
   }
 
-  /**
-   * A JSON line for the server: its strings filtered, while the format around them stays as it is,
-   * field names, protocol words, numbers and booleans, and base64 data. Not JSON, it's text.
-   */
+  /** A JSON line for the server: as JSON (json()), or as text when it isn't JSON. */
   jsonLine(line: string): string {
     if (!this.forward || !this.probe!.test(line)) return line;
-    let value: unknown;
     try {
-      value = JSON.parse(line);
+      return this.json(line);
     } catch {
       return this.text(line);
     }
-    return JSON.stringify(this.walk(value));
   }
 
   /** A string that may hold JSON, such as a `--settings` value: an object or a list as JSON, anything else as text. */
@@ -305,24 +413,24 @@ export class Redactor {
     if (!this.forward || !this.probe!.test(s)) return s;
     if (/^\s*[[{]/.test(s)) {
       try {
-        return JSON.stringify(this.walk(JSON.parse(s)));
+        return this.json(s);
       } catch {}
     }
     return this.text(s);
   }
 
   /**
-   * claude's arguments for the server: the flags as they are, and so the values of those that take
-   * a word of claude's (a model, a format); every other value filtered, JSON as JSON.
+   * claude's arguments for the server: the flags as they are, and so the values of KEPT_FLAGS (a
+   * model, a format, a plugin's path on the host); every other value filtered, JSON as JSON.
    */
   args(args: string[]): string[] {
     if (!this.forward) return args;
     return args.map((a, i) => {
       if (FLAG.test(a)) {
         const eq = a.indexOf("=");
-        return eq < 0 || WORD_FLAGS.has(a.slice(0, eq)) ? a : a.slice(0, eq + 1) + this.value(a.slice(eq + 1));
+        return eq < 0 || KEPT_FLAGS.has(a.slice(0, eq)) ? a : a.slice(0, eq + 1) + this.value(a.slice(eq + 1));
       }
-      return WORD_FLAGS.has(args[i - 1] ?? "") ? a : this.value(a);
+      return KEPT_FLAGS.has(args[i - 1] ?? "") ? a : this.value(a);
     });
   }
 
@@ -333,7 +441,7 @@ export class Redactor {
     return viaText(data, (s) => {
       if (!this.probe!.test(s)) return s;
       try {
-        return `${JSON.stringify(this.walk(JSON.parse(s)), null, 2)}${s.endsWith("\n") ? "\n" : ""}`;
+        return this.json(s);
       } catch {
         return this.text(s);
       }
@@ -357,28 +465,41 @@ export class Redactor {
 
   /** A filter for a byte stream, a line at a time. */
   lines(direction: "redact" | "restore"): Lines {
-    return new Lines(direction === "redact" ? (b) => this.bytes(b) : (b) => this.restoreBytes(b), undefined, this.cutter(direction));
+    return new Lines(direction === "redact" ? (b) => this.bytes(b) : (b) => this.restoreBytes(b), undefined, this.piece(direction));
   }
 
   /**
-   * Where a long piece of text may be cut, going out or coming back: far enough from its end that a
-   * value (a placeholder) starting there is whole, and before one that would be split.
+   * Lines' filter for a part of a long line, going out or coming back. A value (a placeholder) is
+   * replaced only once it is whole and its edges are known: one that starts within the longest
+   * value's length of the end waits for more, as does one the cut would split.
    */
-  private cutter(direction: "redact" | "restore"): ((s: string) => number) | undefined {
-    const re = direction === "redact" ? this.forward : RESTORE;
-    if (!re) return undefined;
+  private piece(direction: "redact" | "restore"): PieceFilter {
+    const re = direction === "redact" ? this.forward : this.fromPlaceholder.size ? RESTORE : undefined;
+    const swap = direction === "redact"
+      ? (m: string) => this.placeholder(this.kinds.get(m.toLowerCase()) ?? "name", m)
+      : (m: string) => this.fromPlaceholder.get(m) ?? m;
     const hold = (direction === "redact" ? this.longest : PLACEHOLDER_MAX) + 2;
-    return (s) => {
-      let cut = Math.max(0, s.length - hold);
-      for (const m of s.matchAll(re)) {
-        const at = m.index ?? 0;
-        if (at >= cut) break;
-        if (at + m[0].length > cut) {
-          cut = at;
+    return (context, text, last) => {
+      const s = context + text;
+      const from = context.length;
+      let cut = last ? s.length : Math.max(from, s.length - hold);
+      if (cut > from && cut < s.length && highSurrogate(s.charCodeAt(cut - 1))) cut--;
+      let out = "";
+      let at = from;
+      for (const m of re ? s.matchAll(re) : []) {
+        const start = m.index ?? 0;
+        const end = start + m[0].length;
+        if (end <= from) continue; // In what went before.
+        if (start >= cut) break;
+        if (end > cut) {
+          cut = Math.max(start, from);
           break;
         }
+        if (start < from) continue;
+        out += s.slice(at, start) + swap(m[0]);
+        at = end;
       }
-      return cut;
+      return { out: out + s.slice(at, cut), used: cut - from };
     };
   }
 
@@ -443,17 +564,43 @@ export class Redactor {
     };
   }
 
-  /** A JSON value with its strings filtered, except protocol words, field names and base64 data. */
-  private walk(v: unknown, field?: string): unknown {
-    if (typeof v === "string") return field !== undefined && PROTOCOL.has(field) ? v : this.text(v);
-    if (Array.isArray(v)) return v.map((x) => this.walk(x));
-    if (!v || typeof v !== "object") return v;
-    const o = v as Record<string, unknown>;
-    const binary = o.type === "base64" || o.type === "image" || "mimeType" in o || "media_type" in o;
-    return Object.fromEntries(Object.entries(o).map(([k, x]) => [
-      FIELD.test(k) ? k : this.text(k),
-      binary && k === "data" && typeof x === "string" ? x : this.walk(x, k),
-    ]));
+  /**
+   * A JSON text with its strings filtered and all else as it was, byte for byte: what is part of the
+   * format stays, field names that are identifiers, protocol words in a message's envelope, base64
+   * data, and numbers of any size. Throws when it isn't JSON.
+   */
+  private json(text: string): string {
+    const edits: [number, number, string][] = [];
+    const filter = (n: JsonString) => {
+      const out = this.text(n.value);
+      if (out !== n.value) edits.push([n.start, n.end, JSON.stringify(out)]);
+    };
+    const visit = (n: Json, field: string | undefined, envelope: boolean) => {
+      if (n.t === "string") {
+        if (!envelope || field === undefined || !PROTOCOL.has(field)) filter(n);
+      } else if (n.t === "array") {
+        for (const x of n.items) visit(x, undefined, envelope);
+      } else if (n.t === "object") {
+        const get = (k: string) => n.entries.find(([key]) => key.value === k)?.[1];
+        const type = get("type");
+        const kind = type?.t === "string" ? type.value : undefined;
+        const binary = kind === "base64" || kind === "image" || get("mimeType") !== undefined || get("media_type") !== undefined;
+        for (const [key, v] of n.entries) {
+          if (!FIELD.test(key.value)) filter(key);
+          if (binary && key.value === "data" && v.t === "string") continue;
+          visit(v, key.value, envelope && !DATA.has(key.value));
+        }
+      }
+    };
+    visit(parseJson(text), undefined, true);
+    if (!edits.length) return text;
+    let out = "";
+    let at = 0;
+    for (const [start, end, replacement] of edits.sort((a, b) => a[0] - b[0])) {
+      out += text.slice(at, start) + replacement;
+      at = end;
+    }
+    return out + text.slice(at);
   }
 
   private placeholder(kind: Kind, text: string): string {

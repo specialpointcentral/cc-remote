@@ -479,9 +479,9 @@ changes it. When it's on, this machine's host name (short and fully qualified), 
 user name (and with it your home folder's path) and its machine id are replaced with placeholders such as `ccr-host-1a2b3c4d`
 in everything cc-remote sends to the server: claude's stream (your prompts, tool results, the
 environment and `CLAUDE.md` in the prompt), the remote command, uploaded transcripts, plugins and
-project files, Monitor output and the server-side file tools. JSON is filtered value by value, so
-field names, protocol words such as a message's role, numbers and booleans stay as they are, even
-when a name happens to be one of them. `cc-remote --cli` is the exception: it connects your terminal
+project files, Monitor output and the server-side file tools. JSON is filtered string by string:
+field names, the protocol's own words where the protocol puts them (a message's role, a JSON-RPC
+method), numbers and booleans stay exactly as written, even when a name happens to be one of them. `cc-remote --cli` is the exception: it connects your terminal
 to the server, so only the command that starts claude is filtered, not what you type or paste, and
 what claude shows comes back unrestored. Whatever comes back has them restored, so the
 tools run, and Orca shows, the real values, while claude on the server, its transcripts and the model

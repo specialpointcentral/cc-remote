@@ -160,6 +160,24 @@ describe("Redactor", () => {
     expect(r.value("user")).toBe(r.text("user"));
   });
 
+  test("protocol words stay only in the envelope; inside data they are data; numbers stay as written", () => {
+    const names = ["initialize", "falcon"].map((text) => ({ kind: "name" as const, text }));
+    const r = new Redactor(KEY, names, { on: true });
+    // A JSON-RPC call to an MCP server, as claude's stream carries one.
+    const rpc = JSON.stringify({ type: "control_request", request_id: "1", request: { subtype: "mcp_message", server_name: "x", message: { jsonrpc: "2.0", id: 1, method: "initialize", params: { method: "initialize", clientInfo: { name: "falcon" } } } } });
+    const sent = JSON.parse(r.jsonLine(rpc));
+    expect(sent.request.message.method).toBe("initialize");
+    expect(sent.request.message.params).toEqual({ method: r.text("initialize"), clientInfo: { name: r.text("falcon") } });
+    // A tool's input and a plugin's metadata are data, whatever their fields are called.
+    const tool = JSON.parse(r.jsonLine(JSON.stringify({ type: "assistant", message: { role: "assistant", content: [{ type: "tool_use", name: "x", input: { type: "falcon", model: "falcon" } }] } })));
+    expect(tool.message.content[0].input).toEqual({ type: r.text("falcon"), model: r.text("falcon") });
+    const plugin = new TextDecoder().decode(r.file("p/plugin.json", new TextEncoder().encode('{"name":"p","metadata":{"role":"falcon","model":"falcon"}}')));
+    expect(JSON.parse(plugin).metadata).toEqual({ role: r.text("falcon"), model: r.text("falcon") });
+    // Only the strings change: a 64-bit integer, spacing and escapes elsewhere stay byte for byte.
+    const line = '{"node_id": 9007199254740993, "title": "falcon",\t"x": "\\u00e9", "n": -1.5e300}';
+    expect(r.jsonLine(line)).toBe(`{"node_id": 9007199254740993, "title": "${r.text("falcon")}",\t"x": "\\u00e9", "n": -1.5e300}`);
+  });
+
   test("claude's arguments: flags and their words stay, values are filtered, JSON as JSON", () => {
     const names = ["sonnet", "false", "falcon"].map((text) => ({ kind: "name" as const, text }));
     const r = new Redactor(KEY, names, { on: true });
@@ -192,6 +210,31 @@ describe("Redactor", () => {
     // A line longer than the limit goes in pieces.
     const small = new Lines((b) => b, 4);
     expect(dec(small.push(enc("abcdef")))).toBe("abcdef");
+  });
+
+  test("a long line in parts reads as the whole line: escapes, longer words and longer values at every cut", () => {
+    const r = make();
+    const enc = (s: string) => new TextEncoder().encode(s);
+    const dec = (b: Uint8Array) => new TextDecoder("utf-8", { fatal: true }).decode(b);
+    const run = (lines: Lines, text: string, size: number) => {
+      const bytes = enc(text);
+      const out: Uint8Array[] = [];
+      for (let i = 0; i < bytes.length; i += size) out.push(lines.push(bytes.subarray(i, i + size)));
+      out.push(lines.flush());
+      return dec(Buffer.concat(out));
+    };
+    // Edges decided by what is around a value: an escaped line break or tab, escaped backslashes
+    // before a letter, a longer word, the longer value that holds a shorter one.
+    const unit = String.raw`\nalice x\\nalice xalice alicex devbox-7.lab.example.net devbox-7 \talice `;
+    // Every place in it lands on the first cut once.
+    for (let shift = 0; shift < unit.length; shift++) {
+      const text = "-".repeat(shift) + unit.repeat(Math.ceil(70_000 / unit.length));
+      const whole = r.text(text);
+      expect(run(r.lines("redact"), text, 65_537)).toBe(whole);
+      expect(run(r.lines("restore"), whole, 65_537)).toBe(text);
+    }
+    const text = unit.repeat(Math.ceil(140_000 / unit.length));
+    for (const size of [7, 4_093]) expect(run(r.lines("redact"), text, size)).toBe(r.text(text));
   });
 
   test("a long line goes in pieces that split neither a value nor a character, either way", () => {
@@ -359,6 +402,24 @@ describe("the wire", () => {
       expect(command).toContain(`mkdir -p "$HOME"/`);
       expect(command).toContain(`exec env  claude '--model' 'sonnet' '--settings' '{"fastMode":false}' '--append-system-prompt' 'ccr-name-`);
       expect(command).not.toContain("claude, run env");
+    } finally {
+      resetRedaction(new Redactor(KEY, values, { on: true }));
+    }
+  });
+
+  test("a plugin's name on the host follows what is replaced, and claude is given the path it was uploaded to", () => {
+    const plugin = join(realpathSync(iso.home), "named-tools");
+    mkdirSync(plugin, { recursive: true });
+    writeFileSync(join(plugin, "x.md"), "Uses bluefalcon.\n");
+    const before = hostLaunch(["--plugin-dir", plugin], "/work", true).uploads[0]!.remote;
+    // A name only its contents hold, and one in the path cc-remote makes for it.
+    resetRedaction(new Redactor(KEY, [...values, { kind: "name", text: "bluefalcon" }, { kind: "name", text: "plugins" }], { on: true }));
+    try {
+      const plan = hostLaunch(["--plugin-dir", plugin], "/work", true);
+      const remote = plan.uploads[0]!.remote;
+      expect(remote).not.toBe(before);
+      expect(remote).toStartWith(".cc-remote/plugins/");
+      expect(remoteCommand(plan.args, {}, "/work")).toContain(remote);
     } finally {
       resetRedaction(new Redactor(KEY, values, { on: true }));
     }

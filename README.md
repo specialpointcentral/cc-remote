@@ -483,7 +483,8 @@ in everything cc-remote sends to the server: claude's stream (your prompts, tool
 environment and `CLAUDE.md` in the prompt), the remote command, uploaded transcripts, plugins and
 project files, Monitor output and the server-side file tools. JSON is filtered string by string:
 field names, the protocol's own words where the protocol puts them (a message's role, a JSON-RPC
-method), numbers and booleans stay exactly as written, even when a name happens to be one of them. `cc-remote --cli` is the exception: it connects your terminal
+method, a hook's or a permission answer's decision), numbers and booleans stay exactly as written,
+even when a name happens to be one of them. A JSON file is all data: every string in it, keys too. `cc-remote --cli` is the exception: it connects your terminal
 to the server, so only the command that starts claude is filtered, not what you type or paste, and
 what claude shows comes back unrestored. Whatever comes back has them restored, so the
 tools run, and Orca shows, the real values, while claude on the server, its transcripts and the model

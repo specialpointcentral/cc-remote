@@ -77,10 +77,15 @@ const PLACEHOLDER = /^ccr-[a-z0-9]+-[0-9a-f]{8,16}(?:\.invalid)?$/;
 
 /**
  * Fields whose string values, in a message's envelope, are words of claude's protocol and never
- * this machine's: a message's type and role, a model, a permission mode, a JSON-RPC method. A listed
- * name that happens to be such a word stays there. Inside DATA they are data like any other field.
+ * this machine's: a message's type and role, a model, a permission mode, a JSON-RPC method, a
+ * permission answer's behavior and where it applies, a hook answer's decision. A listed name that
+ * happens to be such a word stays there. Inside DATA they are data like any other field, and a
+ * file has no envelope (file()).
  */
-const PROTOCOL = new Set(["type", "subtype", "role", "model", "stop_reason", "behavior", "mode", "permissionMode", "hook_event_name", "method", "apiKeySource"]);
+const PROTOCOL = new Set([
+  "type", "subtype", "role", "model", "stop_reason", "behavior", "mode", "permissionMode", "hook_event_name", "method", "apiKeySource",
+  "destination", "decision", "hookEventName", "permissionDecision",
+]);
 /**
  * Fields holding data of any shape rather than more of the envelope: a tool's input (as asked, or
  * as a permission answer changes it), a JSON-RPC call's parameters, a tool's result as a
@@ -342,6 +347,8 @@ export class Redactor {
   private readonly persist?: (entries: Record<string, string>) => void;
   /** The longest value's length: a piece of a long line keeps that much back. */
   private readonly longest: number;
+  /** Strings that go as they are: ones cc-remote made of filtered parts, such as a plugin's path on the server. */
+  private readonly kept = new Set<string>();
 
   constructor(private readonly key: Uint8Array, values: Value[], o: RedactorOptions) {
     this.on = o.on;
@@ -434,14 +441,22 @@ export class Redactor {
     });
   }
 
-  /** A file's bytes for the server: JSON (by its name) as JSON, other text as text, binary data as it is. */
+  /** Has json() pass `text` as it is: a string cc-remote made of parts already filtered. */
+  keep(text: string): void {
+    this.kept.add(text);
+  }
+
+  /**
+   * A file's bytes for the server: JSON (by its name) as JSON, with every string in it data, its
+   * keys too, whatever they're called; other text as text; binary data as it is.
+   */
   file(path: string, data: Uint8Array): Uint8Array {
     if (!this.forward) return data;
     if (!/\.json$/i.test(path)) return this.bytes(data);
     return viaText(data, (s) => {
       if (!this.probe!.test(s)) return s;
       try {
-        return this.json(s);
+        return this.json(s, true);
       } catch {
         return this.text(s);
       }
@@ -567,11 +582,12 @@ export class Redactor {
   /**
    * A JSON text with its strings filtered and all else as it was, byte for byte: what is part of the
    * format stays, field names that are identifiers, protocol words in a message's envelope, base64
-   * data, and numbers of any size. Throws when it isn't JSON.
+   * data, and numbers of any size. A `file` is all data, every key and string. Throws when it isn't JSON.
    */
-  private json(text: string): string {
+  private json(text: string, file = false): string {
     const edits: [number, number, string][] = [];
     const filter = (n: JsonString) => {
+      if (this.kept.has(n.value)) return;
       const out = this.text(n.value);
       if (out !== n.value) edits.push([n.start, n.end, JSON.stringify(out)]);
     };
@@ -586,13 +602,13 @@ export class Redactor {
         const kind = type?.t === "string" ? type.value : undefined;
         const binary = kind === "base64" || kind === "image" || get("mimeType") !== undefined || get("media_type") !== undefined;
         for (const [key, v] of n.entries) {
-          if (!FIELD.test(key.value)) filter(key);
+          if (file || !FIELD.test(key.value)) filter(key);
           if (binary && key.value === "data" && v.t === "string") continue;
           visit(v, key.value, envelope && !DATA.has(key.value));
         }
       }
     };
-    visit(parseJson(text), undefined, true);
+    visit(parseJson(text), undefined, !file);
     if (!edits.length) return text;
     let out = "";
     let at = 0;

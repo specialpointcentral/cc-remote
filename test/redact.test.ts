@@ -178,6 +178,37 @@ describe("Redactor", () => {
     expect(r.jsonLine(line)).toBe(`{"node_id": 9007199254740993, "title": "${r.text("falcon")}",\t"x": "\\u00e9", "n": -1.5e300}`);
   });
 
+  test("a file is all data; a hook's and a permission answer's protocol words stay; a string cc-remote keeps goes as it is", () => {
+    const names = ["falcon", "allow", "approve", "PreToolUse", "session", "plugins"].map((text) => ({ kind: "name" as const, text }));
+    const r = new Redactor(KEY, names, { on: true });
+    const f = r.text("falcon");
+    // A project's or a plugin's JSON file has no envelope: no field keeps its value, and keys are data too.
+    const file = new TextDecoder().decode(r.file("deploy.json", new TextEncoder().encode('{"deployment": {"model": "falcon", "type": "falcon"}, "falcon": true}')));
+    expect(file).toBe(`{"deployment": {"model": "${f}", "type": "${f}"}, "${f}": true}`);
+    // The SDK's answers to a hook and to a permission request.
+    const hook = JSON.parse(r.jsonLine(JSON.stringify({ type: "control_response", response: { subtype: "success", request_id: "cb1", response: {
+      decision: "approve", hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "allow", permissionDecisionReason: "allow falcon" },
+    } } })));
+    expect(hook.response.response).toEqual({
+      decision: "approve", hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "allow", permissionDecisionReason: `${r.text("allow")} ${f}` },
+    });
+    const permission = JSON.parse(r.jsonLine(JSON.stringify({ type: "control_response", response: { subtype: "success", request_id: "p1", response: {
+      behavior: "allow", updatedInput: { note: "allow" },
+      updatedPermissions: [{ type: "addRules", rules: [{ toolName: "Bash", ruleContent: "allow falcon" }], behavior: "allow", destination: "session" }],
+    } } })));
+    expect(permission.response.response).toEqual({
+      behavior: "allow", updatedInput: { note: r.text("allow") },
+      updatedPermissions: [{ type: "addRules", rules: [{ toolName: "Bash", ruleContent: `${r.text("allow")} ${f}` }], behavior: "allow", destination: "session" }],
+    });
+    // A plugin's path on the host, as cc-remote makes it and names it in claude's initialize request.
+    const path = "../../.cc-remote/plugins/ccr-name-0123abcd-kit-1x2y";
+    expect(r.text(path)).not.toBe(path);
+    r.keep(path);
+    const init = JSON.parse(r.jsonLine(JSON.stringify({ type: "control_request", request_id: "i", request: { subtype: "initialize", plugins: [{ type: "local", path }], appendSystemPrompt: "see .cc-remote/plugins" } })));
+    expect(init.request.plugins).toEqual([{ type: "local", path }]);
+    expect(init.request.appendSystemPrompt).toBe(`see .cc-remote/${r.text("plugins")}`);
+  });
+
   test("claude's arguments: flags and their words stay, values are filtered, JSON as JSON", () => {
     const names = ["sonnet", "false", "falcon"].map((text) => ({ kind: "name" as const, text }));
     const r = new Redactor(KEY, names, { on: true });

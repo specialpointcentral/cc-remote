@@ -99,9 +99,10 @@ bun link           # puts cc-remote on your PATH, in ~/.bun/bin
 
 `bun run compile` picks the `build:<os>-<arch>` script for the machine you run it on. To build
 every platform at once (linux-x64, linux-arm64, darwin-arm64, windows-x64, windows-arm64), run
-`bun run build`; the binaries land in `dist/`. A source install updates with `git pull && bun run
-compile`, not `cc-remote update`. The usage plugin's runtime files are embedded in the binary, so
-installing the plugin later needs neither the source checkout nor a GitHub Release download.
+`bun run build`; the binaries land in `dist/`. `bun run compile` stamps the binary with the
+checkout it was built from, so [`cc-remote update`](#update) can build that checkout again and
+install the result. The usage plugin's runtime files are embedded in the binary, so installing the
+plugin later needs neither the source checkout nor a GitHub Release download.
 
 Run `cc-remote setup`, or tell it which host to use yourself and check the connection:
 
@@ -174,21 +175,39 @@ Setup keeps its history and a record of every change it made, with the value it 
 ## Update
 
 ```sh
-cc-remote update --check          # the installed and the latest version; changes nothing
-cc-remote update                  # install the latest release and switch to it
-cc-remote update --version 0.3.1  # that release, older ones too
+cc-remote update --check          # the installed build and the source checkout's; changes nothing
+cc-remote update                  # build the checkout, install the build and switch to it
+cc-remote update --source <dir>   # build another checkout ($CC_REMOTE_SOURCE also names one)
 cc-remote update --rollback       # back to the previous version
+cc-remote update --release        # install a GitHub release instead (--version 0.3.1: that one)
 ```
+
+Updates come from the source checkout a binary was built from: each build's id is package.json's
+version and the commit, plus a hash of uncommitted changes to what goes into the binary (`src`,
+`scripts`, `package.json`, `bun.lock`, `patches`, `orca-usage-plugin`; docs and tests don't
+count). `cc-remote update` runs `bun install --frozen-lockfile` and `bun run compile` in the
+checkout, and nothing changes when the id is the installed one. A first update over a copied or
+linked binary keeps that binary as the previous version. Every Orca chat, ACP session, `doctor`,
+`setup` and `cc-remote usage` checks the checkout in the background, at most every ten minutes
+(local git only; `CC_REMOTE_NO_UPDATE_CHECK=1` turns it off). When it has moved on, `doctor` and
+`setup` say so and, at a terminal, ask whether to update now; the Orca usage plugin's status-bar
+icon turns into a download arrow and its popover has an Update button. When the new build carries
+a newer usage plugin, the update updates an installed plugin in Orca too (`cc-remote update
+--orca-plugin only` does just that: it installs none that isn't and changes nothing else). When the
+plugin can't follow, the update still stands and exits 3; running `cc-remote update` again retries
+the plugin. `--orca-plugin skip` leaves it as it is, which setup passes on when told to skip the
+plugin or Orca; `--orca-profile <dir>` names the Orca, as in setup, and setup passes on the one it
+used.
 
 An update never interrupts what's running. The new version goes into a folder of its own beside
 the current one, and `~/.local/bin/cc-remote` is switched to it with an atomic rename: sessions and
 Orca chats that are running keep the version they started with, and new ones get the new version.
 Orca's Claude Command names `~/.local/bin/cc-remote`, so it never needs changing. Before switching,
-the update checks the download against `SHA256SUMS`, runs it, and, when a server is configured, runs
-its `doctor` there, so a server whose claude is too old for the new version stops the update
-(`--skip-host-check` switches anyway when the server can't be reached). Old versions are removed
-once nothing runs them, and the previous one stays for `--rollback`. cc-remote never updates itself;
-`setup` mentions a newer release when there is one.
+the update runs the new binary (a release is first checked against `SHA256SUMS`) and, when a
+server is configured, runs its `doctor` there, so a server whose claude is too old for the new
+version stops the update (`--skip-host-check` switches anyway when the server can't be reached).
+Old versions are removed once nothing runs them, and the previous one stays for `--rollback`.
+cc-remote never updates itself without a yes at a terminal or a click in the plugin.
 
 ## Viewing usage
 
@@ -325,7 +344,7 @@ cc-remote [--host <host>] doctor             check ssh and the remote claude ver
 cc-remote [--host <host>] --cli <args...>    run `claude <args...>` on the server
 cc-remote [--host <host>] claude <args...>   stand in for `claude` under an Agent SDK app, such as Orca
 cc-remote setup [--check] [options]          set up this machine, the server and Orca; see Setup
-cc-remote update [--check | --rollback]      install the latest release; see Update
+cc-remote update [--check | --rollback]      build the source checkout and switch to it; see Update
 cc-remote --version | --help
 ```
 

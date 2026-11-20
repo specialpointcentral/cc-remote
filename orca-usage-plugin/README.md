@@ -9,7 +9,8 @@ Clicking the status-bar item runs
 `cc-remote usage` to refresh quota (at most once a minute), and the plugin refreshes on its own once
 what it shows is 20 minutes old (30 minutes after a failure); quota data older than 30 minutes or
 past its reset is marked stale. Bars are green, amber or red by pace, with the thresholds of the
-remote Claude status line.
+remote Claude status line. When cc-remote's source checkout has a newer build, the status-bar icon
+turns into a download arrow and the popover has an Update button, which runs `cc-remote update`.
 
 The plugin's runtime files are bundled into cc-remote. Run `cc-remote setup` to check Orca and
 choose whether to install it, or use `cc-remote setup --yes --orca-plugin install` to explicitly

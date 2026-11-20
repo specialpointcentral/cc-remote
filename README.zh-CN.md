@@ -87,8 +87,9 @@ bun link           # 把 cc-remote 加到 PATH，位于 ~/.bun/bin
 
 `bun run compile` 会根据当前机器选择对应的 `build:<os>-<arch>` 脚本。要一次构建所有平台
 （linux-x64、linux-arm64、darwin-arm64、windows-x64、windows-arm64），运行 `bun run build`，产物在 `dist/`。
-从源码安装的用 `git pull && bun run compile` 更新，而不是 `cc-remote update`。用量插件的运行文件
-也会编进二进制，所以之后安装插件不需要保留源码目录，也不需要从 GitHub Release 下载插件。
+`bun run compile` 会在二进制里记下它来自哪个源码目录，因此 [`cc-remote update`](#更新) 可以重新编译
+该目录并安装。用量插件的运行文件也会编进二进制，所以之后安装插件不需要保留源码目录，也不需要从
+GitHub Release 下载插件。
 
 运行 `cc-remote setup`，或者自己指定要用的主机，然后检查连接：
 
@@ -153,18 +154,31 @@ setup 会在 `~/.config/cc-remote/` 中保存输入历史，以及它做过的�
 ## 更新
 
 ```sh
-cc-remote update --check          # 已安装版本和最新版本；不做任何改动
-cc-remote update                  # 安装最新版本并切换过去
-cc-remote update --version 0.3.1  # 指定版本，也可以是更旧的
+cc-remote update --check          # 已安装的版本和源码现在的版本；不做任何改动
+cc-remote update                  # 编译源码目录、安装并切换过去
+cc-remote update --source <目录>  # 改为编译另一个源码目录（也可用 $CC_REMOTE_SOURCE 指定）
 cc-remote update --rollback       # 切回上一个版本
+cc-remote update --release        # 改为安装 GitHub 发布版本（--version 0.3.1：指定版本）
 ```
+
+更新来自二进制编译时所在的源码目录：每次编译的版本号由 package.json 的版本、commit，以及进入二进制的
+内容（`src`、`scripts`、`package.json`、`bun.lock`、`patches`、`orca-usage-plugin`；文档和测试不算）中
+未提交改动的哈希组成。`cc-remote update` 在源码目录里运行 `bun install --frozen-lockfile` 和
+`bun run compile`，版本号与已安装的相同时什么也不做。第一次更新时，原来拷贝或链接过去的二进制会保留为
+上一个版本。每次 Orca 聊天、ACP 会话、`doctor`、`setup` 和 `cc-remote usage` 都会在后台检查源码目录，
+最多每十分钟一次（只用本机 git；`CC_REMOTE_NO_UPDATE_CHECK=1` 可关闭）。源码有新版本时，`doctor` 和
+`setup` 会提示，并在终端中询问是否立即更新；Orca 用量插件的状态栏图标变为下载箭头，弹窗中有“更新”按钮。
+新版本内置的用量插件更新时，更新会一并更新 Orca 中已安装的插件（`cc-remote update --orca-plugin only`
+只做这一步：不会安装尚未安装的插件，也不改动其他设置）。插件未能一并更新时，主程序的更新仍然保留，
+退出状态为 3；再次运行 `cc-remote update` 会重试插件更新。`--orca-plugin skip` 不动插件；setup 指定
+跳过插件或 Orca 时会把它传下去；`--orca-profile <目录>` 指定 Orca，与 setup 相同，setup 会传入它所用的那个。
 
 更新从不打断正在运行的东西。新版本放进当前版本旁边自己的目录，`~/.local/bin/cc-remote` 通过一次原子的
 重命名切换过去：正在运行的会话和 Orca 聊天继续使用它们启动时的版本，新开的才会用新版本。Orca 的
-Claude Command 指向 `~/.local/bin/cc-remote`，因此永远不需要修改。切换之前，更新会用 `SHA256SUMS` 校验
-下载、运行新版本，并在配置了服务器时用它在服务器上运行 `doctor`：服务器上的 claude 对新版本来说太旧时，
-更新会停止（服务器连不上时，`--skip-host-check` 可以照样切换）。旧版本在没有任何进程使用后才会删除，
-上一个版本会保留以便 `--rollback`。cc-remote 从不自动更新；有新版本时 `setup` 会提示。
+Claude Command 指向 `~/.local/bin/cc-remote`，因此永远不需要修改。切换之前，更新会运行新版本（发布版本
+先用 `SHA256SUMS` 校验），并在配置了服务器时用它在服务器上运行 `doctor`：服务器上的 claude 对新版本来说
+太旧时，更新会停止（服务器连不上时，`--skip-host-check` 可以照样切换）。旧版本在没有任何进程使用后才会
+删除，上一个版本会保留以便 `--rollback`。没有你在终端里确认或在插件里点击，cc-remote 不会自行更新。
 
 ## 查看用量
 
@@ -285,7 +299,7 @@ cc-remote [--host <host>] doctor             检查 ssh 和远端 claude 的版�
 cc-remote [--host <host>] --cli <args...>    在服务器上运行 `claude <args...>`
 cc-remote [--host <host>] claude <args...>   在内嵌 Agent SDK 的应用（如 Orca）里替代 `claude`
 cc-remote setup [--check] [options]          设置本机、服务器和 Orca；见“设置”
-cc-remote update [--check | --rollback]      安装最新版本；见“更新”
+cc-remote update [--check | --rollback]      编译源码目录并切换过去；见“更新”
 cc-remote --version | --help
 ```
 

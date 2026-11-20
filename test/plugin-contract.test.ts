@@ -1,7 +1,9 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { activate, binary, layout, writeInstall } from "../src/install/layout";
+import { saveUpdateStatus, updateNotice } from "../src/update/notice";
 import * as usage from "../src/usage";
 import { versionCache } from "../src/version";
 
@@ -13,6 +15,7 @@ import { versionCache } from "../src/version";
 type Worker = {
   cacheRoot(): string;
   readCache(dir: string, host: string): { account?: any; model?: any; session?: any };
+  readUpdate(dir: string, home: string): { current: string; latest: string } | null;
 };
 const worker: Worker = await import(join(import.meta.dir, "..", "orca-usage-plugin", "src", "worker.mjs"));
 
@@ -45,5 +48,32 @@ describe("the usage plugin and cc-remote", () => {
     expect(read.model).toMatchObject({ host: "host-a", models: [{ name: "Fable", usedPercent: 42 }] });
     expect(read.session).toMatchObject({ host: "host-a", sessionId: "s1", totals: { input: 2, output: 4, cacheRead: 6, cacheWrite: 8 } });
     expect(worker.readCache(worker.cacheRoot(), "host-b")).toEqual({ account: undefined, model: undefined, session: undefined });
+  });
+
+  test("agree on the update to offer: one found for the installed version, none once it has switched", () => {
+    const saved = versionCache.dir;
+    versionCache.dir = dir;
+    try {
+      const home = join(dir, "home");
+      const env = { HOME: home };
+      const l = layout(env);
+      // As `cc-remote update` installs a version: its folder, the stable link, install.json.
+      const install = (id: string) => {
+        mkdirSync(dirname(binary(l, id)), { recursive: true });
+        writeFileSync(binary(l, id), "");
+        mkdirSync(dirname(l.stable), { recursive: true });
+        activate(l, id);
+        writeInstall(l, { current: id, installedAt: new Date().toISOString() });
+      };
+      install("0.1.0-aaaaaaa");
+      saveUpdateStatus({ current: "0.1.0-aaaaaaa", latest: "0.1.0-bbbbbbb", source: "/src", checkedAt: Date.now() });
+      expect(worker.readUpdate(dir, home)).toEqual({ current: "0.1.0-aaaaaaa", latest: "0.1.0-bbbbbbb" });
+      expect(updateNotice(false, env)).toContain("0.1.0-bbbbbbb");
+      install("0.1.0-ccccccc");
+      expect(worker.readUpdate(dir, home)).toBeNull();
+      expect(updateNotice(false, env)).toBeUndefined();
+    } finally {
+      versionCache.dir = saved;
+    }
   });
 });

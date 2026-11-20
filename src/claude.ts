@@ -13,6 +13,7 @@ import { redaction } from "./redact";
 import { argument, asChild, hostDir, hostVersion, launch, runRemote, tellTools } from "./ssh";
 import { localTools } from "./tools";
 import { workspace } from "./tools/util";
+import { refreshUpdateStatus } from "./update/notice";
 
 /**
  * What an app asks to find out which claude it has. The host's claude answers, as it would locally;
@@ -117,6 +118,9 @@ export async function claudeCompat(host: string, argv: string[]): Promise<void> 
   // The hooks of this machine's settings: run here, or by the host claude through its --settings.
   const hooks = sessionHooks(cwd, plan.args, ws);
   const child = launch(host, cwd, plan.args, { ...env, CLAUDE_CODE_DISABLE_CLAUDE_MDS: "1" }, plan.uploads, undefined, tellTools(host, ws), hooks.host);
+  // Each Orca chat is a connection: see, in the background, whether the source has a newer build.
+  // After the launch, so the check's start (its git processes) doesn't hold up ssh's.
+  void refreshUpdateStatus();
   const session = { host, cwd, hostDir: hostDir(cwd), mode: plan.mode, dirs: plan.addDirs, ws, sessionId: grantsSession(plan.args), hooks };
   const notAll = init?.id && listed?.leftOut ? notAllApplied(init.id) : undefined;
   const sdk = proxy(asChild(child), session, (toClaude) => {

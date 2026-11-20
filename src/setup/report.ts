@@ -1,4 +1,3 @@
-import pkg from "../../package.json";
 import { updateNotice } from "../update/notice";
 import { sshdAdvice } from "./checks/remote";
 import type { Check, Ctx } from "./context";
@@ -99,6 +98,6 @@ export function summary(ctx: Ctx, host: string | undefined, facts: { distro?: st
     const shorts = [...new Set(left.map(({ check }) => (check.short ?? check.label).split(";")[0]!))];
     ctx.term.line(t(`All good. ${ctx.term.mark("warn")} ${c.warnings} warning${c.warnings === 1 ? "" : "s"} (${shorts.join("; ")}; see \`cc-remote setup -v\`).`, `一切正常。${ctx.term.mark("warn")} ${c.warnings} 项警告（${shorts.join("；")}；详见 \`cc-remote setup -v\`）。`));
   } else ctx.term.line(t("All good.", "一切正常。"));
-  const notice = updateNotice(pkg.version, lang() === "zh");
+  const notice = updateNotice(lang() === "zh", ctx.env);
   if (notice) ctx.term.line(notice);
 }

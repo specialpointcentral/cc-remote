@@ -64,12 +64,28 @@ const TONE = { ok: 'neutral', warn: 'warning', high: 'danger' };
  * The status-bar item, labelled remote, apart from Orca's local Claude account: the five-hour row
  * (else the seven-day one), stale and coloured by that row alone, not by limits it doesn't show.
  */
-export function formatStatus(rows) {
+export function formatStatus(rows, update = null) {
   const [five, seven] = rows;
   const shown = five.used !== null ? five : seven;
-  if (shown.used === null) return { id: 'remote-usage', text: '远程 Claude：等待数据', tooltip: '点击查看远程 Claude 用量', tone: 'neutral' };
+  // A newer cc-remote is a quiet cue on the item: its icon and tooltip, the popover has the button.
+  const cue = update ? { icon: 'download', tooltip: '点击查看远程 Claude 用量 · cc-remote 可更新' } : { icon: 'gauge', tooltip: '点击查看远程 Claude 用量' };
+  if (shown.used === null) return { id: 'remote-usage', text: '远程 Claude：等待数据', ...cue, tone: 'neutral' };
   const text = `远程 Claude ${shown === seven ? '7 天 ' : ''}${shown.used}%${shown.stale ? '（过期）' : ''}`;
-  return { id: 'remote-usage', text, tooltip: '点击查看远程 Claude 用量', tone: TONE[shown.level] };
+  return { id: 'remote-usage', text, ...cue, tone: TONE[shown.level] };
+}
+
+/**
+ * A newer build of cc-remote in its source checkout, as cc-remote's update check saved it, unless
+ * the install has switched since (install.json names another current version).
+ */
+export function readUpdate(dir, home = homedir()) {
+  try {
+    const s = JSON.parse(readSmall(join(dir, 'update-status.json')) ?? '');
+    if (typeof s?.current !== 'string' || typeof s.latest !== 'string' || s.current === s.latest) return null;
+    const install = readSmall(join(home, '.local', 'share', 'cc-remote', 'install.json'));
+    const installed = install ? JSON.parse(install)?.current : undefined;
+    return typeof installed === 'string' && installed !== s.current ? null : { current: s.current, latest: s.latest };
+  } catch { return null; }
 }
 
 /** Whether to refresh on its own: no data yet, data getting old, or a window past its reset. */
@@ -166,7 +182,13 @@ export default function activate(orca) {
   let lastQuery = 0;
   let querying = false;
   let queryFailed = false;
-  let popoverState = { rows: [], tokens: null, querying: false, queryFailed: false, host: '' };
+  let popoverState = { rows: [], tokens: null, querying: false, queryFailed: false, host: '', update: null };
+  // The update the popover's button runs: idle, running, done or failed, and what it said.
+  let updating = { state: 'idle', message: null };
+  const localBinary = () => {
+    const path = join(homedir(), '.local', 'bin', process.platform === 'win32' ? 'cc-remote.exe' : 'cc-remote');
+    return existsSync(path) ? path : 'cc-remote';
+  };
   const hostName = () => process.env.CC_REMOTE_HOST?.trim() || readSmall(join(homedir(), '.config', 'cc-remote', 'host'))?.trim() || '';
   // A refresh asked for while one runs (a query starting or ending) runs right after it.
   const refresh = coalesce(async () => {
@@ -174,8 +196,10 @@ export default function activate(orca) {
       const host = hostName();
       const { account, model, session } = readCache(dir, host);
       const rows = formatPanel(account, model);
-      const status = formatStatus(rows);
-      popoverState = { rows, tokens: session?.totals ?? null, querying, queryFailed, host };
+      const available = readUpdate(dir);
+      const status = formatStatus(rows, available);
+      const update = available || updating.state !== 'idle' ? { current: available?.current ?? '', latest: available?.latest ?? '', ...updating } : null;
+      popoverState = { rows, tokens: session?.totals ?? null, querying, queryFailed, host, update };
       // Apart: the popover's countdowns change every minute, the status bar's text rarely.
       const statusText = JSON.stringify(status);
       if (statusText !== lastStatus) {
@@ -198,11 +222,25 @@ export default function activate(orca) {
     querying = true;
     queryFailed = false;
     void refresh();
-    const localBinary = join(homedir(), '.local', 'bin', process.platform === 'win32' ? 'cc-remote.exe' : 'cc-remote');
-    const binary = existsSync(localBinary) ? localBinary : 'cc-remote';
-    void run(binary, ['usage'], { timeout: 30_000, windowsHide: true })
+    void run(localBinary(), ['usage'], { timeout: 30_000, windowsHide: true })
       .catch(() => { queryFailed = true; })
       .finally(() => { querying = false; void refresh(); });
+  };
+  /** The popover's update button: `cc-remote update`, which builds the source and switches to it. */
+  const runUpdate = () => {
+    if (updating.state === 'running') return;
+    updating = { state: 'running', message: null };
+    void refresh();
+    void run(localBinary(), ['update', '--lang', 'zh'], { timeout: 20 * 60_000, windowsHide: true }).then(
+      () => { updating = { state: 'done', message: '已更新，新开的聊天将使用新版本' }; },
+      (e) => {
+        const said = `${e.stdout ?? ''}\n${e.stderr ?? ''}`.trim().split('\n').filter(Boolean).at(-1)?.slice(0, 120);
+        // 3: cc-remote switched and the plugin didn't follow; the retry's update then only does the plugin.
+        updating = e.code === 3
+          ? { state: 'partial', message: said || '用量插件未更新' }
+          : { state: 'failed', message: said || '运行 cc-remote update 查看原因' };
+      },
+    ).finally(() => void refresh());
   };
   if (process.platform === 'darwin') {
     // Ahead of the first click, which then opens it at once instead of waiting for swiftc.
@@ -211,7 +249,7 @@ export default function activate(orca) {
       const child = spawn(await popoverBinary(), [], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
       child.stderr.on('data', (data) => console.error('Remote Claude usage popover:', String(data).trim()));
       return child;
-    }, () => fetchRemote(0));
+    }, (action) => (action === 'update' ? runUpdate() : fetchRemote(0)));
   }
   orca.commands?.register('usage.open', async () => {
     if (popover) {

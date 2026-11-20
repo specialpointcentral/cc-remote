@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import activate, { coalesce, deactivate, formatPanel, formatStatus, paceLevel, refreshDue } from './worker.mjs';
@@ -119,4 +119,27 @@ test('refreshes on its own when there is no data, data is getting old, or a wind
   assert.equal(refreshDue(aging, undefined, formatPanel(aging, undefined, now), now), true);
   const reset = { fiveHour: { ...fresh.fiveHour, resetsAt: now - 1 } };
   assert.equal(refreshDue(reset, undefined, formatPanel(reset, undefined, now), now), true);
+});
+
+test('offers a newer cc-remote build only while it is about the installed one', async () => {
+  const { readUpdate } = await import('./worker.mjs');
+  const dir = mkdtempSync(join(tmpdir(), 'ccr-plugin-update-'));
+  const home = mkdtempSync(join(tmpdir(), 'ccr-plugin-home-'));
+  try {
+    assert.equal(readUpdate(dir, home), null);
+    writeFileSync(join(dir, 'update-status.json'), JSON.stringify({ current: '0.1.0-aaaaaaa', latest: '0.1.0-bbbbbbb', source: '/src', checkedAt: 1 }), { mode: 0o600 });
+    assert.deepEqual(readUpdate(dir, home), { current: '0.1.0-aaaaaaa', latest: '0.1.0-bbbbbbb' });
+    const rows = formatPanel(undefined, undefined, now);
+    assert.equal(formatStatus(rows, readUpdate(dir, home)).icon, 'download');
+    assert.match(formatStatus(rows, readUpdate(dir, home)).tooltip, /可更新/);
+    assert.equal(formatStatus(rows, null).icon, 'gauge');
+    // Switched since: install.json names another current version, so the saved status is stale.
+    const share = join(home, '.local', 'share', 'cc-remote');
+    mkdirSync(share, { recursive: true });
+    writeFileSync(join(share, 'install.json'), JSON.stringify({ current: '0.1.0-bbbbbbb' }), { mode: 0o600 });
+    assert.equal(readUpdate(dir, home), null);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  }
 });

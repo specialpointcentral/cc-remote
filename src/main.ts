@@ -5,13 +5,15 @@ import { acpProtocolsFromEnv, serveAcp } from "@agentclientprotocol/claude-agent
 import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir, userInfo } from "node:os";
 import { basename, dirname, join } from "node:path";
-import pkg from "../package.json";
+import { createInterface } from "node:readline";
 import { runClaude } from "./auth-cache";
 import { claudeCompat } from "./claude";
 // Static imports: a dynamic import() makes the compiled bundle initialize zod out of order.
 import { main as setup } from "./setup/index";
+import { bundledPluginVersion } from "./setup/orca-plugin-bundle";
 import { main as update } from "./update/index";
-import { refreshLatest, updateNotice } from "./update/notice";
+import { VERSION_ID } from "./update/local";
+import { refreshUpdateStatus, updateNotice } from "./update/notice";
 import { remote } from "./options";
 import { RedactionError, redaction } from "./redact";
 import { settingsProblems } from "./rules";
@@ -44,7 +46,7 @@ Point an ACP client (Zed, paseo, ...) at \`cc-remote --host <host>\`.
   doctor           check the connection and the remote claude version
   usage            show remote subscription limits and locally observed session tokens
   setup            set up this machine, the host and Orca step by step; --check only verifies
-  update           install the latest release beside the current one and switch to it
+  update           build the source checkout beside the current version and switch to it
   -v, --version    print the version
   -h, --help       print this help
 
@@ -95,11 +97,19 @@ async function host(flag?: string): Promise<string> {
   return found || fail("no host. Pass --host, set CC_REMOTE_HOST, or write the host to ~/.config/cc-remote/host");
 }
 
+/** A yes/no question at a terminal; no is the default. */
+async function ask(question: string): Promise<boolean> {
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  const answer = await new Promise<string>((resolve) => rl.question(question, resolve));
+  rl.close();
+  return /^y(es)?$/i.test(answer.trim());
+}
+
 async function doctor(target: string) {
-  console.log(`cc-remote ${pkg.version} (claude-agent-acp ${acpPkg.version})`);
+  console.log(`cc-remote ${VERSION_ID} (claude-agent-acp ${acpPkg.version})`);
   console.log(`host: ${target} via ${rsh().join(" ")}`);
-  // Asked alongside the host, so the release check (at most two seconds, silent on failure) adds no wait.
-  const latest = refreshLatest().catch(() => {});
+  // Asked alongside the host, so the source check (local git, silent on failure) adds no wait.
+  const latest = refreshUpdateStatus(process.env, { force: true });
   // Always asked live; what it finds is what session starts go by for the next while.
   const out = (await hostVersion(target, true)) ?? fail(`could not run claude on ${target}`);
   console.log(`remote claude: ${out}`);
@@ -116,8 +126,10 @@ async function doctor(target: string) {
   }
   console.log("ok");
   await latest;
-  const notice = updateNotice(pkg.version);
+  const notice = updateNotice();
   if (notice) console.log(notice);
+  // Asked only of someone at a terminal: under Orca or an ACP client, doctor runs with no one to answer.
+  if (notice && process.stdin.isTTY && process.stdout.isTTY && (await ask("Update now? [y/N] "))) process.exitCode = await update([]);
 }
 
 /**
@@ -153,6 +165,7 @@ function serve(target: string) {
   console.debug = console.error;
   process.on("unhandledRejection", (reason) => console.error("cc-remote: unhandled rejection:", reason));
   const acp = serveAcp(undefined, { protocols: acpProtocolsFromEnv(Bun.env.CLAUDE_AGENT_ACP_PROTOCOL) });
+  void refreshUpdateStatus();
   const shutdown = async () => {
     await acp.dispose().catch((e: unknown) => console.error("cc-remote: cleanup failed:", e));
     // Sessions under the relay would keep claude running on the host for the grace period.
@@ -192,7 +205,8 @@ if (args.sub) {
 } else if (args.help) {
   console.log(USAGE);
 } else if (args.version) {
-  console.log(`${pkg.version} (cc-remote, claude-agent-acp ${acpPkg.version})`);
+  // The first word is what install.sh and `cc-remote update` file the binary under.
+  console.log(`${VERSION_ID} (cc-remote, claude-agent-acp ${acpPkg.version}, usage plugin ${bundledPluginVersion})`);
 } else {
   const target = await host(args.host);
   if (!args.doctor) checkRedaction();
@@ -200,6 +214,8 @@ if (args.sub) {
   if (args.cli) process.exit(await runClaude(target, args.cli, process.cwd()));
   else if (args.doctor) await doctor(target);
   else if (args.usage) {
+    // The Orca plugin runs this every so often: the update check rides along, for its popover.
+    const checked = refreshUpdateStatus();
     let usage: FetchedUsage | undefined;
     let saved = false;
     try {
@@ -212,6 +228,7 @@ if (args.sub) {
       saved = true;
     }
     console.log(renderUsage(target, usage, lastSessionUsage(target), saved));
+    await checked;
   }
   else serve(target);
 }

@@ -73,6 +73,24 @@ export async function installBundledPlugin(home: string, rpc: PluginRpc): Promis
   }
 }
 
+/**
+ * For `cc-remote update --orca-plugin`: brings an installed usage plugin up to the bundled version,
+ * and changes nothing else. One that isn't installed, is disabled or awaits Orca's approval is left
+ * as it is, as is a newer one.
+ */
+export async function updateInstalledPlugin(rpc: PluginRpc, home: string, platform: NodeJS.Platform, version: string | undefined, desktop: string | undefined): Promise<{ ok: boolean; detail: string }> {
+  const result = await inspectUsagePlugin(rpc, platform, version, desktop);
+  if (result.kind === "installed") return { ok: true, detail: t(`current (${result.version})`, `已是最新（${result.version}）`) };
+  if (result.kind === "missing") return { ok: true, detail: t("not installed; left so", "未安装，保持不变") };
+  if (result.kind === "disabled" || result.kind === "consent") return { ok: true, detail: t(`${result.kind === "disabled" ? "disabled" : "awaiting Orca's approval"}; left as it is`, `${result.kind === "disabled" ? "已禁用" : "等待 Orca 授权"}，保持不变`) };
+  if (result.kind !== "outdated") return { ok: false, detail: t(`can't be updated here (${result.kind}${result.detail ? `: ${result.detail}` : ""}); run cc-remote setup`, `无法在此更新（${result.kind}${result.detail ? `：${result.detail}` : ""}）；请运行 cc-remote setup`) };
+  await installBundledPlugin(home, rpc);
+  const after = await inspectUsagePlugin(rpc, platform, version, desktop);
+  return after.kind === "installed"
+    ? { ok: true, detail: t(`updated ${result.version ?? "?"} → ${after.version}`, `已更新 ${result.version ?? "?"} → ${after.version}`) }
+    : { ok: false, detail: t(`Orca did not enable it (${after.kind})`, `Orca 未启用（${after.kind}）`) };
+}
+
 /** Report the preflight result and offer only the explicitly consented plugin installation. */
 export async function checkAndInstallUsagePlugin(ctx: Ctx, rpc: PluginRpc, version: string | undefined, desktop: string | undefined, profile?: string): Promise<Check> {
   // Skipped: --check still reports what is there, anything else leaves it alone unseen.

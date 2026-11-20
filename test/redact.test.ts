@@ -423,6 +423,8 @@ describe("the wire", () => {
     const command = remoteCommand(["--append-system-prompt", "work on falcon-1"], { NOTE: "falcon" }, "/work/falcon");
     expect(command).toStartWith("unset SSH_CONNECTION SSH_CLIENT SSH_TTY; ");
     expect(command).not.toMatch(real);
+    // Without a folder too, as for the usage query.
+    expect(remoteCommand(["--append-system-prompt", "work on falcon-1"], {}, undefined)).toStartWith("unset SSH_CONNECTION SSH_CLIENT SSH_TTY; ");
   });
 
   test("only the data in the remote command is replaced: its own words, flags, a model and JSON booleans stay", () => {

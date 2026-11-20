@@ -21,11 +21,14 @@ import { hostVersion, quote, rsh } from "./ssh";
 import { killAll } from "./tools";
 import { home } from "./tools/util";
 import { tooOld } from "./version";
+import { type FetchedUsage, lastSessionUsage, rememberFetchedUsage, renderUsage, savedUsage } from "./usage";
+import { remoteUsage } from "./usage-query";
 
 const USAGE = `Usage: cc-remote [--host <host>]
        cc-remote [--host <host>] --cli <claude arguments...>
        cc-remote [--host <host>] claude <claude arguments...>
        cc-remote [--host <host>] doctor
+       cc-remote [--host <host>] usage
        cc-remote setup [options]      (see cc-remote setup --help)
        cc-remote update [options]     (see cc-remote update --help)
 
@@ -39,6 +42,7 @@ Point an ACP client (Zed, paseo, ...) at \`cc-remote --host <host>\`.
                    Agent SDK, such as Orca: its tools run here, in the current directory.
                    Also what cc-remote does when it is run under the name \`claude\`
   doctor           check the connection and the remote claude version
+  usage            show remote subscription limits and locally observed session tokens
   setup            set up this machine, the host and Orca step by step; --check only verifies
   update           install the latest release beside the current one and switch to it
   -v, --version    print the version
@@ -55,7 +59,7 @@ const fail = (message: string): never => {
 };
 
 function parse(argv: string[]) {
-  const args = { host: undefined as string | undefined, cli: undefined as string[] | undefined, claude: undefined as string[] | undefined, doctor: false, version: false, help: false, sub: undefined as { name: "setup" | "update"; argv: string[] } | undefined };
+  const args = { host: undefined as string | undefined, cli: undefined as string[] | undefined, claude: undefined as string[] | undefined, doctor: false, usage: false, version: false, help: false, sub: undefined as { name: "setup" | "update"; argv: string[] } | undefined };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!;
     if (a === "--cli") { args.cli = argv.slice(i + 1); break; }
@@ -64,6 +68,7 @@ function parse(argv: string[]) {
     if (a === "--host") args.host = argv[++i] ?? fail("--host needs a value");
     else if (a.startsWith("--host=")) args.host = a.slice(7);
     else if (a === "doctor") args.doctor = true;
+    else if (a === "usage") args.usage = true;
     else if (a === "-v" || a === "--version") args.version = true;
     else if (a === "-h" || a === "--help") args.help = true;
     else fail(`unknown argument ${a}. See cc-remote --help`);
@@ -194,5 +199,19 @@ if (args.sub) {
   process.on("exit", killAll);
   if (args.cli) process.exit(await runClaude(target, args.cli, process.cwd()));
   else if (args.doctor) await doctor(target);
+  else if (args.usage) {
+    let usage: FetchedUsage | undefined;
+    let saved = false;
+    try {
+      usage = rememberFetchedUsage(target, await remoteUsage(target));
+    } catch (e) {
+      // Still exit 1, which tells the Orca plugin its refresh failed.
+      console.error(`cc-remote: could not query remote usage: ${(e as Error).message}`);
+      process.exitCode = 1;
+      usage = savedUsage(target);
+      saved = true;
+    }
+    console.log(renderUsage(target, usage, lastSessionUsage(target), saved));
+  }
   else serve(target);
 }

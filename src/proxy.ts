@@ -13,9 +13,12 @@ import { redaction } from "./redact";
 import { type Destination, persistAllowRule, type ShellTool, TrackedSettingsError, type Verdict } from "./rules";
 import { mirrorKey, projectKey, projectsDir, writeMirror } from "./sessions";
 import type { Workspace } from "./tools/util";
+import { rememberAccountUsage, rememberSessionUsage } from "./usage";
 
 /** What one claude process needs to have its messages read as if it ran in `cwd` on this machine. */
 export type Session = {
+  /** Central server: separates locally saved usage from other accounts/hosts. */
+  host?: string;
   /** The local working directory. */
   cwd: string;
   /** The folder claude runs in on the host, relative to the host's home. */
@@ -114,6 +117,12 @@ export function rewriter(s: Session) {
   function outbound(line: string, reply: (line: string) => void): string | null {
     let text = strip(line);
     if (text.includes("/.cc-remote/ws/")) text = text.replace(hostPath, local);
+    if (s.host && (text.includes('"rate_limit_event"') || text.includes('"modelUsage"'))) {
+      // Each checks the message's type itself.
+      const m = JSON.parse(text);
+      rememberAccountUsage(s.host, m);
+      rememberSessionUsage(s.host, m);
+    }
     if (text.includes('"transcript_mirror"')) {
       const m = JSON.parse(text);
       if (m.type === "transcript_mirror" && typeof m.filePath === "string") {

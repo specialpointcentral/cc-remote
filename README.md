@@ -184,6 +184,18 @@ its `doctor` there, so a server whose claude is too old for the new version stop
 once nothing runs them, and the previous one stays for `--rollback`. cc-remote never updates itself;
 `setup` mentions a newer release when there is one.
 
+## Viewing usage
+
+Run `cc-remote usage` to ask the remote Claude for its five-hour, seven-day, and available
+model-specific subscription windows and reset times. It also shows the latest completed cc-remote session's cumulative token
+counts observed on this machine, with the observation time; this is one session, not an account-wide
+total. Use `cc-remote --host <your-server> usage` to choose another server. When the query fails, it
+shows the windows saved earlier, each with when it was observed, and exits with status 1.
+
+These `modelUsage` totals include subagents and other query pipeline calls; they are neither a
+quota percentage nor a bill. The private local cache keeps only numbers, session identifier and
+timestamps, never conversation text or remote credentials.
+
 ## Use
 
 Once cc-remote is installed, it works with any client that speaks ACP. Add an agent whose command

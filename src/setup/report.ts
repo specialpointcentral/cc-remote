@@ -93,10 +93,10 @@ export function summary(ctx: Ctx, host: string | undefined, facts: { distro?: st
     if (!c.failed && !ctx.mode.check) ctx.term.line(t("Next: open a new Claude chat in Orca, or `acpc -a cc-remote`.", "下一步：在 Orca 中新开一个 Claude 聊天，或运行 `acpc -a cc-remote`。"));
   } else if (c.failed) {
     const shorts = [...new Set(left.filter(({ check }) => check.status === "fail").map(({ check }) => check.short ?? check.label))];
-    ctx.term.line(t(`${ctx.term.mark("fail")} ${c.failed} failed (${shorts.join("; ")})${c.warnings ? `, ${ctx.term.mark("warn")} ${c.warnings} warning${c.warnings === 1 ? "" : "s"}` : ""}; see \`cc-remote setup --check -v\`.`, `${ctx.term.mark("fail")} ${c.failed} 项失败（${shorts.join("；")}）${c.warnings ? `，${ctx.term.mark("warn")} ${c.warnings} 项警告` : ""}；详见 \`cc-remote setup --check -v\`。`));
+    ctx.term.line(t(`${ctx.term.mark("fail")} ${c.failed} failed (${shorts.join("; ")})${c.warnings ? `, ${ctx.term.mark("warn")} ${c.warnings} warning${c.warnings === 1 ? "" : "s"}` : ""}; see \`cc-remote setup --check --verbose\`.`, `${ctx.term.mark("fail")} ${c.failed} 项失败（${shorts.join("；")}）${c.warnings ? `，${ctx.term.mark("warn")} ${c.warnings} 项警告` : ""}；详见 \`cc-remote setup --check --verbose\`。`));
   } else if (c.warnings) {
     const shorts = [...new Set(left.map(({ check }) => (check.short ?? check.label).split(";")[0]!))];
-    ctx.term.line(t(`All good. ${ctx.term.mark("warn")} ${c.warnings} warning${c.warnings === 1 ? "" : "s"} (${shorts.join("; ")}; see \`cc-remote setup -v\`).`, `一切正常。${ctx.term.mark("warn")} ${c.warnings} 项警告（${shorts.join("；")}；详见 \`cc-remote setup -v\`）。`));
+    ctx.term.line(t(`All good. ${ctx.term.mark("warn")} ${c.warnings} warning${c.warnings === 1 ? "" : "s"} (${shorts.join("; ")}; see \`cc-remote setup --verbose\`).`, `一切正常。${ctx.term.mark("warn")} ${c.warnings} 项警告（${shorts.join("；")}；详见 \`cc-remote setup --verbose\`）。`));
   } else ctx.term.line(t("All good.", "一切正常。"));
   const notice = updateNotice(lang() === "zh", ctx.env);
   if (notice) ctx.term.line(notice);

@@ -31,7 +31,7 @@ const CHECK: Mode = { interactive: false, check: true };
 
 describe("flags and consent", () => {
   test("parses flags in both forms and refuses bad ones", () => {
-    const o = parseArgs(["--host=central", "-y", "--orca", "set", "--ssh-key=generate", "--lang", "zh", "-v"]);
+    const o = parseArgs(["--host=central", "-y", "--orca", "set", "--ssh-key=generate", "--lang", "zh", "--verbose"]);
     expect(o).toMatchObject({ host: "central", yes: true, orca: "set", sshKey: "generate", lang: "zh", verbose: true });
     expect(() => parseArgs(["--orca", "maybe"])).toThrow(UsageError);
     expect(() => parseArgs(["--frobnicate"])).toThrow(UsageError);
@@ -51,6 +51,8 @@ describe("flags and consent", () => {
   test("the Orca usage plugin is checked first and requires its own installation consent", () => {
     expect(opts(["--orca-plugin", "install"]).orcaPlugin).toBe("install");
     expect(() => opts(["--orca-plugin", "unknown"])).toThrow(UsageError);
+    // -v is the version everywhere (cc-remote -v): setup has --verbose only.
+    expect(() => opts(["-v"])).toThrow(UsageError);
     expect(() => opts(["--check", "--orca-plugin", "install"])).toThrow(UsageError);
     expect(() => opts(["--orca", "skip", "--orca-plugin", "install"])).toThrow(UsageError);
     expect(pluginDecision(opts(["--yes", "--install"]), BATCH, false)).toBe("skip");

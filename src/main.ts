@@ -11,7 +11,7 @@ import { claudeCompat } from "./claude";
 // Static imports: a dynamic import() makes the compiled bundle initialize zod out of order.
 import { main as setup } from "./setup/index";
 import { bundledPluginVersion } from "./setup/orca-plugin-bundle";
-import { main as update } from "./update/index";
+import { configuredHost, main as update } from "./update/index";
 import { VERSION_ID } from "./update/local";
 import { refreshUpdateStatus, updateNotice } from "./update/notice";
 import { remote } from "./options";
@@ -31,8 +31,8 @@ const USAGE = `Usage: cc-remote [--host <host>]
        cc-remote [--host <host>] claude <claude arguments...>
        cc-remote [--host <host>] doctor
        cc-remote [--host <host>] usage
-       cc-remote setup [options]      (see cc-remote setup --help)
-       cc-remote update [options]     (see cc-remote update --help)
+       cc-remote [--host <host>] setup [options]     (see cc-remote setup --help)
+       cc-remote [--host <host>] update [options]    (see cc-remote update --help)
 
 Claude Code as an ACP agent, with the model on a remote host and the tools on this machine.
 Point an ACP client (Zed, paseo, ...) at \`cc-remote --host <host>\`.
@@ -91,11 +91,8 @@ function checkRedaction() {
   }
 }
 
-async function host(flag?: string): Promise<string> {
-  const file = Bun.file(`${home}/.config/cc-remote/host`);
-  const found = flag ?? Bun.env.CC_REMOTE_HOST ?? ((await file.exists()) ? (await file.text()).trim() : "");
-  return found || fail("no host. Pass --host, set CC_REMOTE_HOST, or write the host to ~/.config/cc-remote/host");
-}
+const host = (flag?: string): string =>
+  configuredHost(process.env, home, flag) ?? fail("no host. Pass --host, set CC_REMOTE_HOST, or write the host to ~/.config/cc-remote/host");
 
 /** A yes/no question at a terminal; no is the default. */
 async function ask(question: string): Promise<boolean> {
@@ -129,7 +126,8 @@ async function doctor(target: string) {
   const notice = updateNotice();
   if (notice) console.log(notice);
   // Asked only of someone at a terminal: under Orca or an ACP client, doctor runs with no one to answer.
-  if (notice && process.stdin.isTTY && process.stdout.isTTY && (await ask("Update now? [y/N] "))) process.exitCode = await update([]);
+  // The update checks the server this doctor just did.
+  if (notice && process.stdin.isTTY && process.stdout.isTTY && (await ask("Update now? [y/N] "))) process.exitCode = await update(["--host", target]);
 }
 
 /**
@@ -193,22 +191,23 @@ process.emitWarning = ((warning: string | Error, ...rest: [{ code?: string }?]) 
 const asClaude = COMPILED && basename(process.argv0).replace(/\.exe$/i, "") === "claude";
 
 const args = asClaude ? { ...parse([]), claude: process.argv.slice(2) } : parse(process.argv.slice(2));
-if (args.sub) {
-  // Before host(): setup is how a host gets configured, and update needs none.
+if (args.version) {
+  // The first word is what install.sh and `cc-remote update` file the binary under.
+  console.log(`${VERSION_ID} (cc-remote, claude-agent-acp ${acpPkg.version}, usage plugin ${bundledPluginVersion})`);
+} else if (args.sub) {
+  // Before host(): setup is how a host gets configured, and update needs none. The global flags
+  // before it still go to it: --host, and --help for its own.
   const main = args.sub.name === "setup" ? setup : update;
-  process.exit(await main(args.host && args.sub.name === "setup" ? ["--host", args.host, ...args.sub.argv] : args.sub.argv));
+  process.exit(await main([...(args.host ? ["--host", args.host] : []), ...(args.help ? ["--help"] : []), ...args.sub.argv]));
 } else if (args.claude) {
-  const target = await host(args.host);
+  const target = host(args.host);
   checkRedaction();
   process.on("exit", killAll);
   await claudeCompat(target, args.claude);
 } else if (args.help) {
   console.log(USAGE);
-} else if (args.version) {
-  // The first word is what install.sh and `cc-remote update` file the binary under.
-  console.log(`${VERSION_ID} (cc-remote, claude-agent-acp ${acpPkg.version}, usage plugin ${bundledPluginVersion})`);
 } else {
-  const target = await host(args.host);
+  const target = host(args.host);
   if (!args.doctor) checkRedaction();
   process.on("exit", killAll);
   if (args.cli) process.exit(await runClaude(target, args.cli, process.cwd()));

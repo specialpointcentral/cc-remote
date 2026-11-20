@@ -158,7 +158,7 @@ cc-remote update --check          # 已安装的版本和源码现在的版本�
 cc-remote update                  # 编译源码目录、安装并切换过去
 cc-remote update --source <目录>  # 改为编译另一个源码目录（也可用 $CC_REMOTE_SOURCE 指定）
 cc-remote update --rollback       # 切回上一个版本
-cc-remote update --release        # 改为安装 GitHub 发布版本（--version 0.3.1：指定版本）
+cc-remote update --release [0.3.1] # 改为安装 GitHub 发布版本：最新版本，或指定的版本
 ```
 
 更新来自二进制编译时所在的源码目录：每次编译的版本号由 package.json 的版本、commit，以及进入二进制的
@@ -298,10 +298,16 @@ cc-remote [--host <host>]                    在 stdio 上提供 ACP（客户端
 cc-remote [--host <host>] doctor             检查 ssh 和远端 claude 的版本
 cc-remote [--host <host>] --cli <args...>    在服务器上运行 `claude <args...>`
 cc-remote [--host <host>] claude <args...>   在内嵌 Agent SDK 的应用（如 Orca）里替代 `claude`
-cc-remote setup [--check] [options]          设置本机、服务器和 Orca；见“设置”
-cc-remote update [--check | --rollback]      编译源码目录并切换过去；见“更新”
+cc-remote [--host <host>] usage              远端 Claude 的额度和最近一个会话的 Token 用量
+cc-remote [--host <host>] setup [--check]    设置本机、服务器和 Orca；见“设置”
+cc-remote [--host <host>] update [--check]   编译源码目录并切换过去；见“更新”
 cc-remote --version | --help
 ```
+
+各命令的参数含义一致。全局参数（`--host`、`-h`/`--help`、`-v`/`--version`）作用于其后的命令，任何命令都
+不会把它们用作别的含义。短参数只有 `-h`、`-v`（版本）和 `-y`（不提问）。`--check` 从不改动任何东西。选择型
+参数用 `auto` 表示默认、`skip` 表示不动（`--orca`、`--orca-plugin`、`--ssh-key`）。有对应环境变量的参数，
+环境变量名为 `CC_REMOTE_<参数名>`，参数优先。
 
 ## 行为
 

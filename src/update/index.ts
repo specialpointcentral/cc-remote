@@ -21,8 +21,8 @@ import { checksumFor, download, latestVersion, sha256 } from "./release";
  * setup and doctor ask at a terminal, the Orca plugin has a button.
  */
 const USAGE = {
-  en: `Usage: cc-remote update [--check | --rollback] [--source <dir>] [--skip-host-check]
-       cc-remote update --release [--check | --version <v>] [--skip-host-check]
+  en: `Usage: cc-remote update [--check | --rollback] [--source <dir>] [--host <destination>] [--skip-host-check]
+       cc-remote update --release [<v>] [--check] [--host <destination>] [--skip-host-check]
 
 Builds cc-remote from its source checkout, installs the build beside the current one and switches
 ~/.local/bin/cc-remote to it. Running sessions and chats keep the version they started with; new
@@ -33,19 +33,22 @@ ones get the new version.
   --check             show the installed build and the checkout's; change nothing
   --rollback          switch back to the previous version
   --source <dir>      build this checkout instead ($CC_REMOTE_SOURCE also names one)
-  --release           install a GitHub release instead of building; --version <v> picks one
+  --release [<v>]     install a GitHub release instead of building: the latest, or version <v>
   --orca-plugin only|skip
                       only bring an installed Orca usage plugin up to this build's, or leave it as
                       it is (by default an update brings an installed one up to the new build's)
   --orca-profile <dir>
                       the Orca the plugin is in, as setup names it ($CC_REMOTE_ORCA_PROFILE)
+  --host <destination>
+                      the central server whose claude the new build is checked against
+                      ($CC_REMOTE_HOST, else the host file)
   --skip-host-check   switch even when the central server can't be reached to check its claude
                       (a server that answers with a claude that is too old still stops the update)
   --lang en|zh        language of the messages
 
 Exit status 3: cc-remote was updated, but the Orca usage plugin wasn't.`,
-  zh: `用法：cc-remote update [--check | --rollback] [--source <目录>] [--skip-host-check]
-      cc-remote update --release [--check | --version <版本>] [--skip-host-check]
+  zh: `用法：cc-remote update [--check | --rollback] [--source <目录>] [--host <目标>] [--skip-host-check]
+      cc-remote update --release [<版本>] [--check] [--host <目标>] [--skip-host-check]
 
 从源码目录编译 cc-remote，安装在当前版本旁边，并把 ~/.local/bin/cc-remote 切换过去。
 正在运行的会话和聊天继续使用启动时的版本；之后新开的才会用新版本。
@@ -54,12 +57,14 @@ Exit status 3: cc-remote was updated, but the Orca usage plugin wasn't.`,
   --check             显示已安装的版本和源码现在的版本；不做任何改动
   --rollback          切回上一个版本
   --source <目录>     改为编译这个源码目录（也可用 $CC_REMOTE_SOURCE 指定）
-  --release           不编译，改为安装 GitHub 发布版本；--version <版本> 指定版本
+  --release [<版本>]  不编译，改为安装 GitHub 发布版本：最新版本，或指定的版本
   --orca-plugin only|skip
                       只把 Orca 中已安装的用量插件更新到本版本内置的，或不动它
                       （默认：更新后把已安装的插件更新到新版本内置的）
   --orca-profile <目录>
                       插件所在的 Orca，与 setup 的同名选项相同（$CC_REMOTE_ORCA_PROFILE）
+  --host <目标>
+                      用新版本检查哪台中心服务器的 claude（$CC_REMOTE_HOST，否则用 host 文件）
   --skip-host-check   中心服务器连不上、无法检查其 claude 时也照样切换
                       （服务器能连上但 claude 太旧时，仍会停止更新）
   --lang en|zh        提示信息的语言
@@ -68,7 +73,7 @@ Exit status 3: cc-remote was updated, but the Orca usage plugin wasn't.`,
 };
 
 /** `orcaPlugin`: an installed Orca usage plugin follows an update (auto), is all that's updated (only), or is left (skip). */
-type Options = { check: boolean; version?: string; rollback: boolean; release: boolean; source?: string; orcaPlugin: "auto" | "only" | "skip"; orcaProfile?: string; skipHostCheck: boolean; help: boolean; lang?: string };
+type Options = { check: boolean; version?: string; rollback: boolean; release: boolean; source?: string; host?: string; orcaPlugin: "auto" | "only" | "skip"; orcaProfile?: string; skipHostCheck: boolean; help: boolean; lang?: string };
 
 class Usage extends Error {}
 
@@ -85,7 +90,13 @@ function parse(argv: string[]): Options {
     if (flag === "--check") o.check = true;
     else if (flag === "--rollback") o.rollback = true;
     else if (flag === "--skip-host-check") o.skipHostCheck = true;
-    else if (flag === "--release") o.release = true;
+    else if (flag === "--release") {
+      // A version may follow, as in `--release 0.3.1` or `--release=0.3.1`: none is the latest.
+      o.release = true;
+      const v = inline ?? (argv[i + 1] !== undefined && !argv[i + 1]!.startsWith("-") ? argv[++i] : undefined);
+      if (v !== undefined) o.version = v.replace(/^v/, "");
+    }
+    else if (flag === "--host") o.host = value();
     else if (flag === "--source") o.source = value();
     else if (flag === "--orca-profile") o.orcaProfile = value();
     else if (flag === "--orca-plugin") {
@@ -93,14 +104,12 @@ function parse(argv: string[]): Options {
       if (v !== "auto" && v !== "only" && v !== "skip") throw new Usage(`--orca-plugin takes auto, only or skip, not ${v}`);
       o.orcaPlugin = v;
     }
-    else if (flag === "--version") o.version = value().replace(/^v/, "");
     else if (flag === "--lang") o.lang = value();
     else if (flag === "-h" || flag === "--help") o.help = true;
     else throw new Usage(`unknown argument ${a}`);
   }
-  if (o.version !== undefined && !VERSION.test(o.version)) throw new Usage(`--version needs a version such as 0.3.1, not ${o.version}`);
-  if ([o.check, o.rollback, o.version !== undefined].filter(Boolean).length > 1) throw new Usage("use only one of --check, --version and --rollback");
-  if (o.version !== undefined && !o.release) throw new Usage("--version picks a release: add --release");
+  if (o.version !== undefined && !VERSION.test(o.version)) throw new Usage(`--release takes a version such as 0.3.1, not ${o.version}`);
+  if ([o.check, o.rollback, o.version !== undefined].filter(Boolean).length > 1) throw new Usage("use only one of --check, --release <v> and --rollback");
   if (o.source !== undefined && (o.release || o.rollback)) throw new Usage("--source names what to build: it doesn't go with --release or --rollback");
   if (o.orcaPlugin === "only" && (o.check || o.rollback || o.release || o.source !== undefined)) throw new Usage("--orca-plugin only goes on its own");
   if (o.lang !== undefined && o.lang !== "en" && o.lang !== "zh") throw new Usage("--lang takes en or zh");
@@ -135,8 +144,9 @@ async function run(argv: string[], env: Record<string, string | undefined>, time
   }
 }
 
-/** The host doctor would use: CC_REMOTE_HOST, else the host file. */
-function configuredHost(env: Record<string, string | undefined>, home: string): string | undefined {
+/** The central server: --host, else CC_REMOTE_HOST, else the host file. */
+export function configuredHost(env: Record<string, string | undefined>, home: string, flag?: string): string | undefined {
+  if (flag?.trim()) return flag.trim();
   if (env.CC_REMOTE_HOST?.trim()) return env.CC_REMOTE_HOST.trim();
   try {
     return readFileSync(join(home, ".config", "cc-remote", "host"), "utf8").trim() || undefined;
@@ -402,13 +412,14 @@ async function promote(l: Layout, o: Options, current: string | undefined, id: s
  * enough for it; false when the switch must not happen.
  */
 async function hostGate(bin: string, o: Options, env: Record<string, string | undefined>, say: (s: string) => void): Promise<boolean> {
-  const host = configuredHost(env, env.HOME || env.USERPROFILE || "");
+  const host = configuredHost(env, env.HOME || env.USERPROFILE || "", o.host);
   if (!host) {
     say(t("No central server is configured, so its claude wasn't checked against the new version.", "没有配置中心服务器，因此没有检查其 claude 是否满足新版本的要求。"));
     return true;
   }
   say(t(`Checking ${host} with the new version…`, `正在用新版本检查 ${host}…`));
-  const doctor = await run([bin, "doctor"], { ...env, CC_REMOTE_NO_VERSION_CACHE: "1", CC_REMOTE_NO_UPDATE_CHECK: "1" }, 120_000);
+  // The host as CC_REMOTE_HOST, which every build's doctor takes.
+  const doctor = await run([bin, "doctor"], { ...env, CC_REMOTE_HOST: host, CC_REMOTE_NO_VERSION_CACHE: "1", CC_REMOTE_NO_UPDATE_CHECK: "1" }, 120_000);
   if (doctor.code === 0) return true;
   const reached = /^remote claude: /m.test(doctor.out);
   for (const line of doctor.out.trim().split("\n")) say(`  ${line}`);

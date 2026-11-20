@@ -146,7 +146,7 @@ export async function runSetup(w: World, argv: string[], options: { tty?: boolea
     }
   })();
   try {
-    const code = await main(argv, { stdin, stdout, env: process.env, osRelease: w.osRelease, root: false });
+    const code = await main(argv, { stdin, stdout, env: process.env, osRelease: w.osRelease, platform: "linux", root: false });
     return { code, out: plain(text), left: pending.length };
   } finally {
     done = true;

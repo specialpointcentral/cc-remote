@@ -9,6 +9,7 @@ import { checkSharedConnection, hostDir, launch, tellTools } from "../src/ssh";
 import { versionCache } from "../src/version";
 import { fakeHost, TEAMS_OFF } from "./fakehost";
 import { isolate } from "./fixture";
+import { processes } from "./processes";
 
 const dir = realpathSync(mkdtempSync(join(tmpdir(), "cc-remote-reconnect-")));
 const host = fakeHost(dir);
@@ -55,14 +56,7 @@ const until = async (check: () => boolean, ms = 20_000) => {
 
 /** Processes running from the fake host's home: the relay's daemons and bridges, and the fake claude. */
 function hostProcesses(): string[] {
-  const found: string[] = [];
-  for (const pid of readdirSync("/proc").filter((p) => /^\d+$/.test(p))) {
-    try {
-      const cmd = readFileSync(`/proc/${pid}/cmdline`, "utf8").replaceAll("\0", " ");
-      if (cmd.includes(host.home) && !cmd.includes("bun ")) found.push(`${pid} ${cmd.trim()}`);
-    } catch {}
-  }
-  return found;
+  return processes().filter(([, cmd]) => cmd.includes(host.home) && !cmd.includes("bun ")).map(([pid, cmd]) => `${pid} ${cmd}`);
 }
 
 const runRoot = () => join(host.home, ".cc-remote", "run");

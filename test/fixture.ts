@@ -31,8 +31,9 @@ const ENV = ["HOME", "SHELL", "CLAUDE_CONFIG_DIR", "BASH_ENV", "ENV", "CC_REMOTE
 
 /**
  * Points everything the shell tool reads at a temporary home: the login shell, its profile, the
- * snapshot directories, Claude's user and managed settings, and git's global config, where a
- * persisted approval adds its excludes entry. Nothing real is read or written.
+ * snapshot directories, Claude's user and managed settings, git's global config, where a
+ * persisted approval adds its excludes entry, and cc-remote's caches, which follow HOME. Nothing
+ * real is read or written.
  */
 export function isolate() {
   const env = Object.fromEntries(ENV.map((k) => [k, process.env[k]]));

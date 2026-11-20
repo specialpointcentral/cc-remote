@@ -2,7 +2,7 @@ import { chmodSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, st
 import { join } from "node:path";
 import { WINDOWS } from "./platform";
 import { argument } from "./ssh";
-import { versionCache } from "./version";
+import { cacheFolder } from "./version";
 
 /**
  * "Allow for this session" approvals of shell commands (`Bash(npm test:*)`), kept per session in a
@@ -15,7 +15,9 @@ import { versionCache } from "./version";
  * The format is in the folder's name and the file's content: cc-remotes of other formats keep
  * their own folders, and a file this one can't read counts as no approvals.
  */
-export const grantStore = { dir: join(versionCache.dir, "grants", "v1"), ttlMs: 3 * 24 * 60 * 60_000 };
+export const grantStore = { dir: undefined as string | undefined, ttlMs: 3 * 24 * 60 * 60_000 };
+/** `dir` when pinned (tests), else a folder in the shared cache. */
+const folder = () => grantStore.dir ?? join(cacheFolder(), "grants", "v1");
 
 const FORMAT = 1;
 
@@ -28,7 +30,7 @@ export function grantsSession(args: string[]): string | undefined {
   return id && SESSION.test(id) ? id : undefined;
 }
 
-const file = (sessionId: string) => join(grantStore.dir, `${sessionId}.json`);
+const file = (sessionId: string) => join(folder(), `${sessionId}.json`);
 
 let swept = false;
 
@@ -37,8 +39,8 @@ function sweep(now: number) {
   if (swept) return;
   swept = true;
   try {
-    for (const name of readdirSync(grantStore.dir)) {
-      const path = join(grantStore.dir, name);
+    for (const name of readdirSync(folder())) {
+      const path = join(folder(), name);
       try {
         if (now - statSync(path).mtimeMs >= grantStore.ttlMs) rmSync(path, { force: true });
       } catch {}
@@ -70,8 +72,8 @@ export function saveGrants(sessionId: string, cwd: string, grants: Iterable<stri
   if (!SESSION.test(sessionId)) return;
   sweep(now);
   try {
-    mkdirSync(grantStore.dir, { recursive: true, mode: 0o700 });
-    if (!WINDOWS) chmodSync(grantStore.dir, 0o700);
+    mkdirSync(folder(), { recursive: true, mode: 0o700 });
+    if (!WINDOWS) chmodSync(folder(), 0o700);
     const all = [...new Set([...loadGrants(sessionId, cwd, now), ...grants])];
     const path = file(sessionId);
     const temp = `${path}.${process.pid}.tmp`;

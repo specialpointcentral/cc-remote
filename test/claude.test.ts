@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough, type Readable } from "node:stream";
@@ -14,14 +14,21 @@ import { mirrorKey, projectsDir } from "../src/sessions";
 import { argument, hostDir, spawner } from "../src/ssh";
 import { localTools } from "../src/tools";
 import { workspace } from "../src/tools/util";
-import { fakeHost, TEAMS_OFF } from "./fakehost";
+import { versionCache } from "../src/version";
+import { fakeHost, ownHome, TEAMS_OFF } from "./fakehost";
 
-const dir = mkdtempSync(join(tmpdir(), "cc-remote-claude-"));
+// By its real path, as cc-remote sees its working directory: macOS reaches the temporary folder through /var.
+const dir = realpathSync(mkdtempSync(join(tmpdir(), "cc-remote-claude-")));
 const savedConfigDir = Bun.env.CLAUDE_CONFIG_DIR;
-beforeAll(() => { Bun.env.CLAUDE_CONFIG_DIR = join(dir, "config"); });
+const savedCache = versionCache.dir;
+beforeAll(() => {
+  Bun.env.CLAUDE_CONFIG_DIR = join(dir, "config");
+  versionCache.dir = join(dir, "cache");
+});
 afterAll(() => {
   if (savedConfigDir === undefined) delete Bun.env.CLAUDE_CONFIG_DIR;
   else Bun.env.CLAUDE_CONFIG_DIR = savedConfigDir;
+  versionCache.dir = savedCache;
   rmSync(dir, { recursive: true, force: true });
 });
 
@@ -359,12 +366,12 @@ describe("cc-remote claude", () => {
   // Each case starts cc-remote (a new bun) several times, which takes seconds on a busy machine.
   const SPAWNS = 30_000;
   const host = fakeHost(join(dir, "entry"));
-  const cache = join(dir, "entry", "cache");
+  const home = ownHome(join(dir, "entry", "home"));
   beforeAll(() => mkdirSync(join(dir, "work-entry"), { recursive: true }));
   const run = (...args: string[]) =>
     Bun.spawnSync(["bun", join(import.meta.dir, "..", "src", "main.ts"), "--host", "box", "claude", ...args], {
       cwd: join(dir, "work-entry"),
-      env: { ...Bun.env, ...host.env, XDG_CACHE_HOME: cache, CLAUDE_CODE_FROM_SDK: "1", CLAUDE_CODE_OAUTH_TOKEN: "secret" },
+      env: { ...Bun.env, ...host.env, ...home.env, CLAUDE_CODE_FROM_SDK: "1", CLAUDE_CODE_OAUTH_TOKEN: "secret" },
       stdin: "ignore",
     });
 
@@ -382,10 +389,10 @@ describe("cc-remote claude", () => {
   }, SPAWNS);
 
   test("version probes that start together ask the host once", async () => {
-    const fresh = join(dir, "entry", "cache-together");
+    const fresh = ownHome(join(dir, "entry", "home-together"));
     host.reset();
     const probe = () => Bun.spawn(["bun", join(import.meta.dir, "..", "src", "main.ts"), "--host", "box", "claude", "--version"], {
-      cwd: join(dir, "work-entry"), env: { ...Bun.env, ...host.env, XDG_CACHE_HOME: fresh }, stdin: "ignore", stdout: "pipe",
+      cwd: join(dir, "work-entry"), env: { ...Bun.env, ...host.env, ...fresh.env }, stdin: "ignore", stdout: "pipe",
     });
     const outs = await Promise.all([probe(), probe(), probe()].map((p) => new Response(p.stdout).text()));
     expect(outs).toEqual(Array(3).fill("2.1.323 (Claude Code)\n"));
@@ -451,7 +458,7 @@ describe("cc-remote claude", () => {
     host.reset();
     const proc = Bun.spawn(["bun", join(import.meta.dir, "..", "src", "main.ts"), "--host", "box", "claude", "--output-format", "stream-json", "--verbose", "--input-format", "stream-json", "--await-initialize"], {
       cwd: join(dir, "work-entry"),
-      env: { ...Bun.env, ...host.env, XDG_CACHE_HOME: cache, CC_REMOTE_RECONNECT_GRACE: "0" },
+      env: { ...Bun.env, ...host.env, ...home.env, CC_REMOTE_RECONNECT_GRACE: "0" },
       stdin: "pipe",
       stdout: "pipe",
       stderr: "pipe",

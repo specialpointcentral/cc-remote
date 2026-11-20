@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
-import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, constants, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { activate, type Fs, installed, layout, realFs } from "../src/install/layout";
@@ -10,9 +10,12 @@ import { checksumFor } from "../src/update/release";
 /**
  * `cc-remote update` against a fake GitHub (the latest-release API, the assets and SHA256SUMS on
  * a local server) and a managed install in a temporary home. The "binaries" are shell scripts
- * that print their version and play doctor; a running old version is a copy of the real `sleep`.
+ * that print their version and play doctor; a running old version is a copy of the real `sleep`
+ * (of bun on macOS).
  */
-const ASSET = `cc-remote-${process.platform === "win32" ? "windows" : process.platform}-${process.arch}`;
+/** This machine's platform, so that in-use detection is the real one: /proc on Linux, lsof on macOS. */
+const PLATFORM: NodeJS.Platform = process.platform === "darwin" ? "darwin" : "linux";
+const ASSET = `cc-remote-${PLATFORM}-${process.arch}`;
 type Doctor = "ok" | "old" | "unreachable";
 const releases = new Map<string, { body: string; sum?: string }>();
 let latest = "0.3.0";
@@ -69,7 +72,7 @@ function home(versions: string[], options: { host?: string } = {}) {
     HOME: dir, PATH: process.env.PATH ?? "/usr/bin:/bin", LANG: "en_US.UTF-8",
     CC_REMOTE_RELEASE_API: `${server.url}api/latest`, CC_REMOTE_RELEASE_BASE: `${server.url}releases`,
   } as Record<string, string>;
-  const l = layout(env, "linux");
+  const l = layout(env, PLATFORM);
   for (const v of versions) {
     if (!releases.has(v)) release(v);
     mkdirSync(join(l.versions, v), { recursive: true, mode: 0o700 });
@@ -90,7 +93,7 @@ function home(versions: string[], options: { host?: string } = {}) {
 /** Releases come with --release now; building from source is the default (test/update-local.test.ts). */
 async function update(h: ReturnType<typeof home>, argv: string[] = [], self = { compiled: true, execPath: "/opt/cc-remote" }) {
   let out = "";
-  const code = await main(argv.includes("--rollback") ? argv : ["--release", ...argv], { env: h.env, out: { write: (s: string) => (out += s) }, platform: "linux", self });
+  const code = await main(argv.includes("--rollback") ? argv : ["--release", ...argv], { env: h.env, out: { write: (s: string) => (out += s) }, platform: PLATFORM, self });
   return { code, out };
 }
 
@@ -105,8 +108,10 @@ function running(h: ReturnType<typeof home>, version: string) {
   const dir = join(h.l.versions, version);
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   rmSync(join(dir, "cc-remote"), { force: true });
-  copyFileSync(realpathSync(Bun.which("sleep")!), join(dir, "cc-remote"));
-  const child = Bun.spawn([join(dir, "cc-remote"), "600"], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+  // macOS kills a copy of a system binary such as sleep; a copy of bun runs, and APFS clones it.
+  const [bin, ...args] = process.platform === "darwin" ? [process.execPath, "-e", "setTimeout(() => {}, 600_000)"] : [Bun.which("sleep")!, "600"];
+  copyFileSync(realpathSync(bin), join(dir, "cc-remote"), constants.COPYFILE_FICLONE);
+  const child = Bun.spawn([join(dir, "cc-remote"), ...args], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
   children.push(child);
   return child;
 }
@@ -142,7 +147,7 @@ describe("cc-remote update", () => {
     // Still running, from their own files, after the switch.
     expect(old.exitCode).toBeNull();
     expect(current.exitCode).toBeNull();
-    expect(readlinkSync(`/proc/${old.pid}/exe`)).toBe(join(h.l.versions, "0.0.9", "cc-remote"));
+    if (process.platform === "linux") expect(readlinkSync(`/proc/${old.pid}/exe`)).toBe(join(h.l.versions, "0.0.9", "cc-remote"));
     // Current and previous kept, the in-use one kept, 0.1.0 (neither, not running) and 0.0.8 removed.
     expect(existsSync(join(h.l.versions, "0.3.0"))).toBe(true);
     expect(existsSync(join(h.l.versions, "0.2.0"))).toBe(true);
@@ -374,11 +379,16 @@ describe("the switch", () => {
     const h = home([]);
     running(h, "0.0.1");
     mkdirSync(join(h.l.versions, "0.0.2"), { recursive: true });
-    if (process.platform === "linux") {
+    if (process.platform === "linux" || process.platform === "darwin") {
       expect(inUse(join(h.l.versions, "0.0.1"))).toBe(true);
       expect(inUse(join(h.l.versions, "0.0.2"))).toBe(false);
     }
-    expect(inUse(join(h.l.versions, "0.0.2"), "darwin", () => `p1\nn${join(h.l.versions, "0.0.2", "cc-remote")}\n`)).toBe(true);
+    // lsof names the real path, as /proc does: a home reached through a symlink still matches.
+    const lsof = () => `p1\nn${join(realpathSync(h.l.versions), "0.0.2", "cc-remote")}\n`;
+    expect(inUse(join(h.l.versions, "0.0.2"), "darwin", lsof)).toBe(true);
+    symlinkSync(h.dir, `${h.dir}-link`);
+    dirs.push(`${h.dir}-link`);
+    expect(inUse(join(h.l.versions.replace(h.dir, `${h.dir}-link`), "0.0.2"), "darwin", lsof)).toBe(true);
     expect(inUse(join(h.l.versions, "0.0.2"), "darwin", () => undefined)).toBeUndefined();
     expect(inUse(join(h.l.versions, "0.0.2"), "freebsd")).toBeUndefined();
   });

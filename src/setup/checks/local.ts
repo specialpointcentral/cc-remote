@@ -3,7 +3,7 @@ import { hostname, userInfo } from "node:os";
 import { basename, dirname } from "node:path";
 import { binary, installed, layout } from "../../install/layout";
 import { loginShell } from "../../tools/login";
-import { versionCache } from "../../version";
+import { cacheFolder } from "../../version";
 import type { Check, Ctx } from "../context";
 import { validateCommand } from "../orca";
 import { hostnameAdvice, installPlan, type Machine, parseOsRelease, type Pkg } from "../os";
@@ -171,7 +171,8 @@ export async function localChecks(ctx: Ctx): Promise<Local> {
   }
 
   // L9: the version cache, which spares Orca's per-chat `--version` an ssh round trip.
-  let dir = versionCache.dir;
+  const cache = cacheFolder(ctx.env);
+  let dir = cache;
   while (!existsSync(dir) && dirname(dir) !== dir) dir = dirname(dir);
   let cacheOk = true;
   try {
@@ -180,8 +181,8 @@ export async function localChecks(ctx: Ctx): Promise<Local> {
     cacheOk = false;
   }
   checks.push(cacheOk
-    ? { id: "L9", status: "pass", label: "cache", detail: ctx.tilde(versionCache.dir) }
-    : { id: "L9", status: "warn", label: "cache", detail: t(`${ctx.tilde(versionCache.dir)} isn't writable: each Orca chat's version check costs an ssh round trip`, `${ctx.tilde(versionCache.dir)} 不可写：每个 Orca 聊天的版本检查都要走一次 ssh`) });
+    ? { id: "L9", status: "pass", label: "cache", detail: ctx.tilde(cache) }
+    : { id: "L9", status: "warn", label: "cache", detail: t(`${ctx.tilde(cache)} isn't writable: each Orca chat's version check costs an ssh round trip`, `${ctx.tilde(cache)} 不可写：每个 Orca 聊天的版本检查都要走一次 ssh`) });
 
   return { checks, missing, machine: m, isSsh: ssh.isSsh };
 }

@@ -236,7 +236,7 @@ export async function main(argv: string[], io: UpdateIo = {}): Promise<number> {
   const current = state.kind === "managed" ? state.version : undefined;
 
   const source = o.source ?? sourceDir(env);
-  if (o.check && !o.release) return check(state.kind === "unmanaged" ? undefined : (current ?? VERSION_ID), l.stable, source, say, now);
+  if (o.check && !o.release) return check(state.kind === "unmanaged" ? undefined : (current ?? VERSION_ID), l.stable, source, env, say, now);
   if (o.check) {
     say(t(`installed: ${current ?? pkg.version}${current ? ` (${l.stable})` : " (not installed with install.sh)"}`, `已安装：${current ?? pkg.version}${current ? `（${l.stable}）` : "（不是用 install.sh 安装的）"}`));
     try {
@@ -336,7 +336,7 @@ async function rollback(l: Layout, current: string | undefined, previous: string
   }
   const at = now();
   switchTo(l, fs, at, current, previous, { current: previous, previous: current, installedAt: new Date(at).toISOString() });
-  switched(previous);
+  switched(previous, env);
   say(t(`Rolled back ${current} → ${previous}. Running sessions keep ${current} until they end.`, `已回退 ${current} → ${previous}。正在运行的会话结束前继续使用 ${current}。`));
   return 0;
 }
@@ -385,7 +385,7 @@ async function update(l: Layout, o: Options, current: string | undefined, env: R
     return 1;
   }
   if (!(await promote(l, o, current, target, undefined, env, say, platform, fs, now))) return 1;
-  switched(target);
+  switched(target, env);
   return 0;
 }
 
@@ -434,13 +434,13 @@ async function hostGate(bin: string, o: Options, env: Record<string, string | un
 }
 
 /** The saved update status, now about the version just switched to. */
-function switched(id: string) {
-  const status = updateStatus();
-  if (status) saveUpdateStatus({ ...status, current: id });
+function switched(id: string, env: Record<string, string | undefined>) {
+  const status = updateStatus(env);
+  if (status) saveUpdateStatus({ ...status, current: id }, env);
 }
 
 /** `installedId` undefined: the stable path holds a copied or linked binary, which an update replaces. */
-async function check(installedId: string | undefined, stable: string, source: string | undefined, say: (s: string) => void, now: () => number) {
+async function check(installedId: string | undefined, stable: string, source: string | undefined, env: Record<string, string | undefined>, say: (s: string) => void, now: () => number) {
   say(installedId
     ? t(`installed: ${installedId}`, `已安装：${installedId}`)
     : t(`installed: ${stable} is a copied or linked binary; an update makes it a managed install`, `已安装：${stable} 是拷贝或链接的二进制；更新后会转为受管理的安装`));
@@ -453,7 +453,7 @@ async function check(installedId: string | undefined, stable: string, source: st
     return 1;
   }
   say(t(`source:    ${latest} (${source})`, `源码：  ${latest}（${source}）`));
-  if (installedId) saveUpdateStatus({ current: installedId, latest, source, checkedAt: now() });
+  if (installedId) saveUpdateStatus({ current: installedId, latest, source, checkedAt: now() }, env);
   say(latest === installedId ? t("Up to date.", "已是最新。") : t("Update available: cc-remote update", "有新版本：cc-remote update"));
   return 0;
 }
@@ -535,7 +535,7 @@ async function updateFromSource(l: Layout, o: Options, state: Installed, source:
     return (await followPlugin(bin, env, say, o.orcaProfile)) ? 0 : PLUGIN_NOT_UPDATED;
   };
   // Built from the checkout just now: the installed version is its latest.
-  const latest = (id: string) => saveUpdateStatus({ current: id, latest: id, source, checkedAt: now() });
+  const latest = (id: string) => saveUpdateStatus({ current: id, latest: id, source, checkedAt: now() }, env);
   const unchanged = async (id: string) => {
     latest(id);
     say(t(`cc-remote ${id} is installed and current.`, `cc-remote ${id} 已安装且为当前版本。`));

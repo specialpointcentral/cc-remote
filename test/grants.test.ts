@@ -24,8 +24,10 @@ afterAll(() => {
 });
 
 let n = 0;
+let store = "";
 beforeEach(() => {
-  grantStore.dir = join(base, `store-${++n}`, "grants", "v1");
+  store = join(base, `store-${++n}`, "grants", "v1");
+  grantStore.dir = store;
   resetGrants();
 });
 
@@ -46,11 +48,11 @@ describe("session grants", () => {
     saveGrants(ID, project, ["Bash(npm test:*)"]);
     saveGrants(ID, project, ["Bash(make:*)"]);
     expect(loadGrants(ID, project)).toEqual(["Bash(npm test:*)", "Bash(make:*)"]);
-    const file = join(grantStore.dir, `${ID}.json`);
+    const file = join(store, `${ID}.json`);
     expect(statSync(file).mode & 0o777).toBe(0o600);
-    expect(statSync(grantStore.dir).mode & 0o777).toBe(0o700);
+    expect(statSync(store).mode & 0o777).toBe(0o700);
     expect(JSON.parse(readFileSync(file, "utf8"))).toMatchObject({ format: 1, sessionId: ID, cwd: project });
-    expect(readdirSync(grantStore.dir)).toEqual([`${ID}.json`]);
+    expect(readdirSync(store)).toEqual([`${ID}.json`]);
     // Another directory, another session, or a format this cc-remote doesn't know: none.
     expect(loadGrants(ID, join(base, "elsewhere"))).toEqual([]);
     expect(loadGrants("other", project)).toEqual([]);
@@ -65,15 +67,15 @@ describe("session grants", () => {
     saveGrants(ID, project, ["Bash(npm test:*)"], now);
     saveGrants("old", project, ["Bash(make:*)"], now);
     const old = (now - grantStore.ttlMs - 1_000) / 1000;
-    utimesSync(join(grantStore.dir, "old.json"), old, old);
+    utimesSync(join(store, "old.json"), old, old);
     expect(loadGrants("old", project, now)).toEqual([]);
     resetGrants();
     saveGrants("new", project, [], now);
-    expect(readdirSync(grantStore.dir).sort()).toEqual([`${ID}.json`, "new.json"]);
+    expect(readdirSync(store).sort()).toEqual([`${ID}.json`, "new.json"]);
     const before = (now - 60_000) / 1000;
-    utimesSync(join(grantStore.dir, `${ID}.json`), before, before);
+    utimesSync(join(store, `${ID}.json`), before, before);
     expect(loadGrants(ID, project, now)).toEqual(["Bash(npm test:*)"]);
-    expect(statSync(join(grantStore.dir, `${ID}.json`)).mtimeMs).toBeGreaterThan(now - 1_000);
+    expect(statSync(join(store, `${ID}.json`)).mtimeMs).toBeGreaterThan(now - 1_000);
   });
 
   test("allow for this session holds in the next claude process for the same session, as after Orca switches a chat's mode", () => {

@@ -8,10 +8,11 @@ import { RELAY_PATH, RELAY_SOURCE } from "../src/relay";
 import { projectKey } from "../src/sessions";
 import { hostDir, launch, rsh, spawner, teamsOff, type Upload } from "../src/ssh";
 import { archive } from "../src/tar";
-import { cachedVersion, MIN_CLAUDE, older, rememberVersion, tooOld, versionCache } from "../src/version";
+import { cacheFolder, cachedVersion, MIN_CLAUDE, older, rememberVersion, tooOld, versionCache } from "../src/version";
 import { fakeHost, TEAMS_OFF } from "./fakehost";
 
-const dir = mkdtempSync(join(tmpdir(), "cc-remote-launch-"));
+// By its real path: claude names a project after it, and macOS reaches the temporary folder through /var.
+const dir = realpathSync(mkdtempSync(join(tmpdir(), "cc-remote-launch-")));
 const host = fakeHost(dir);
 const KEYS = ["CC_REMOTE_SSH", "FAKE_SSH_LOG", "FAKE_HOST_HOME", "FAKE_HOST_CONFIG", "CLAUDE_CONFIG_DIR", "FAKE_REFUSE_SHARED", "FAKE_NOISE", "FAKE_CLAUDE_VERSION", "CC_REMOTE_CONTROL_PERSIST", "CC_REMOTE_KEEPALIVE_TIMEOUT"];
 const savedEnv = Object.fromEntries(KEYS.map((k) => [k, Bun.env[k]]));
@@ -362,8 +363,9 @@ describe("old relay scripts", () => {
   test("go once unused for a week, unless a daemon still runs one; this version's is marked used", async () => {
     const [old, recent, running] = [`relay-old${tag}.py`, `relay-new${tag}.py`, `relay-run${tag}.py`];
     const h = host({ [current]: 30, [old]: 10, [recent]: 2, [running]: 10 });
-    // A daemon started from an old version's script: its path is in its arguments.
-    const daemon = Bun.spawn(["sh", "-c", "sleep 30", join(h.bin, running)]);
+    // A daemon started from an old version's script: its path is in its arguments. The `; :` keeps
+    // a shell that execs a lone command (macOS's sh does) from replacing them with sleep's.
+    const daemon = Bun.spawn(["sh", "-c", "sleep 30; :", join(h.bin, running)]);
     try {
       const r = Bun.spawnSync(["sh", "-c", script], { cwd: h.home, env: { HOME: h.home, PATH: Bun.env.PATH! } });
       expect(r.stdout.toString()).toStartWith("READY-r\t");
@@ -451,14 +453,14 @@ describe("version cache", () => {
     expect(cachedVersion("h", 1_000 + versionCache.ttlMs - 1)).toBe("2.1.323 (Claude Code)");
     expect(cachedVersion("h", 1_000 + versionCache.ttlMs)).toBeUndefined();
     expect(cachedVersion("other", 1_000)).toBeUndefined();
-    const [file] = readdirSync(versionCache.dir);
-    expect(statSync(join(versionCache.dir, file!)).mode & 0o777).toBe(0o600);
-    expect(statSync(versionCache.dir).mode & 0o777).toBe(0o700);
+    const [file] = readdirSync(cacheFolder());
+    expect(statSync(join(cacheFolder(), file!)).mode & 0o777).toBe(0o600);
+    expect(statSync(cacheFolder()).mode & 0o777).toBe(0o700);
     // Something that isn't a version isn't remembered.
     rememberVersion("junk", "command not found");
     expect(cachedVersion("junk")).toBeUndefined();
     // A cache file in a format this cc-remote doesn't know reads as no cache.
-    const path = join(versionCache.dir, file!);
+    const path = join(cacheFolder(), file!);
     expect(file).toStartWith("claude-version-v1-");
     writeFileSync(path, JSON.stringify({ ...JSON.parse(readFileSync(path, "utf8")), format: 2 }));
     expect(cachedVersion("h", 1_000)).toBeUndefined();

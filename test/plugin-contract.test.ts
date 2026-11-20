@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 import { activate, binary, layout, writeInstall } from "../src/install/layout";
 import { saveUpdateStatus, updateNotice } from "../src/update/notice";
 import * as usage from "../src/usage";
-import { versionCache } from "../src/version";
+import { cacheDir, versionCache } from "../src/version";
 
 /**
  * The Orca usage plugin is plain JavaScript that Orca runs, so it can't import cc-remote's code: it
@@ -30,7 +30,7 @@ afterEach(() => {
 
 describe("the usage plugin and cc-remote", () => {
   test("find the same cache folder, CC_REMOTE_USAGE_CACHE_DIR first", () => {
-    expect(worker.cacheRoot()).toBe(versionCache.dir);
+    expect(worker.cacheRoot()).toBe(cacheDir());
     process.env.CC_REMOTE_USAGE_CACHE_DIR = dir;
     expect(worker.cacheRoot()).toBe(dir);
   });

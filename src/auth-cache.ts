@@ -3,7 +3,7 @@ import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, re
 import { join } from "node:path";
 import { WINDOWS } from "./platform";
 import { remoteCommand, rsh, runRemote } from "./ssh";
-import { versionCache } from "./version";
+import { cacheFolder } from "./version";
 
 /**
  * `claude auth status`, remembered per host for a minute. claude-agent-acp asks for it through the
@@ -15,7 +15,9 @@ import { versionCache } from "./version";
  * Like the version cache, the format is in the file's name and content: older and newer cc-remotes
  * may share the folder, and a file this one can't read counts as no cache.
  */
-export const authCache = { dir: versionCache.dir, ttlMs: 60_000, waitMs: 4_000 };
+export const authCache = { dir: undefined as string | undefined, ttlMs: 60_000, waitMs: 4_000 };
+/** `dir` when pinned (tests), else the shared cache folder. */
+const folder = () => authCache.dir ?? cacheFolder();
 
 /** A probe that has held the lock this long was killed: the next one takes over. */
 const STALE_MS = 15_000;
@@ -25,7 +27,7 @@ const FORMAT = 1;
 type Entry = { out: string; code: number; at: number };
 
 /** The same host through a different ssh command may be another machine. */
-const file = (host: string) => join(authCache.dir, `auth-status-v${FORMAT}-${Bun.hash(`${host}\n${Bun.env.CC_REMOTE_SSH ?? ""}`).toString(36)}.json`);
+const file = (host: string) => join(folder(), `auth-status-v${FORMAT}-${Bun.hash(`${host}\n${Bun.env.CC_REMOTE_SSH ?? ""}`).toString(36)}.json`);
 
 /** What a claude command line does to the login: `status` asks, `change` logs in or out. Global `--settings` may come first. */
 export function authCommand(args: string[]): "status" | "change" | undefined {
@@ -54,7 +56,7 @@ export function cachedAuth(host: string, args: string[], now = Date.now()): Entr
 /** Remembers an answer; the file is private, and replaced in one rename. One that can't be written is no cache. */
 export function rememberAuth(host: string, args: string[], out: string, code: number, now = Date.now()) {
   try {
-    mkdirSync(authCache.dir, { recursive: true, mode: 0o700 });
+    mkdirSync(folder(), { recursive: true, mode: 0o700 });
     const fresh = Object.entries(entries(host)).filter(([, e]) => now - e.at < authCache.ttlMs);
     const path = file(host);
     const temp = `${path}.${process.pid}`;
@@ -88,7 +90,7 @@ async function probe(host: string, args: string[], cwd: string): Promise<{ out: 
   const lock = `${file(host)}.lock`;
   let held = false;
   try {
-    mkdirSync(authCache.dir, { recursive: true, mode: 0o700 });
+    mkdirSync(folder(), { recursive: true, mode: 0o700 });
     if (existsSync(lock) && Date.now() - statSync(lock).mtimeMs > STALE_MS) rmSync(lock, { force: true });
     closeSync(openSync(lock, "wx", 0o600));
     held = true;

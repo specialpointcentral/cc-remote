@@ -1,0 +1,18 @@
+{
+  "manifestVersion": 2,
+  "id": "cc-remote-usage",
+  "name": "Remote Claude Usage",
+  "version": "0.4.6",
+  "description": "Shows the configured remote Claude's observed quota and session tokens.",
+  "engines": {
+    "orca": ">=1.4.248"
+  },
+  "execution": "trusted-worker",
+  "pluginApi": 1,
+  "main": "src/worker.mjs",
+  "contributes": {
+    "statusBarItems": [{ "id": "remote-usage", "text": "远程 Claude：等待数据", "icon": "gauge", "tooltip": "点击查看远程 Claude 用量", "command": "usage.open" }],
+    "commands": [{ "id": "usage.open", "title": "查看远程 Claude 用量", "when": "workspace" }]
+  },
+  "capabilities": []
+}

@@ -1,6 +1,6 @@
 import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, realpathSync } from "node:fs";
 import { createConnection } from "node:net";
-import { isAbsolute, join } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import { alive, readPrivateJson } from "./files";
 
 /**
@@ -12,22 +12,25 @@ import { alive, readPrivateJson } from "./files";
  */
 export const VERIFIED = ["1.4.254"];
 
-export class OrcaError extends Error {}
+export class OrcaError extends Error {
+  constructor(message: string, readonly code?: string, readonly data?: unknown) { super(message); }
+}
 
 export type Runtime = { profile: string; endpoint: string; runtimeId: string; token: string; pid: number };
 
 type Env = Record<string, string | undefined>;
 
 /**
- * Where profiles may be, in order: the flag or CC_REMOTE_ORCA_PROFILE, then orcad's own choice
- * (ORCA_USER_DATA, else $XDG_DATA_HOME/Orca, else ~/.orca: `fne()` in the bundle), then the desktop
- * app's (ORCA_USER_DATA_PATH, else ~/Library/Application Support/orca on macOS and
- * ${XDG_CONFIG_HOME:-~/.config}/orca elsewhere: the CLI's `ph()`).
+ * Where profiles may be: the one the flag or CC_REMOTE_ORCA_PROFILE names, alone, never another
+ * that happens to run; else, in order, orcad's own choice (ORCA_USER_DATA, else $XDG_DATA_HOME/Orca,
+ * else ~/.orca: `fne()` in the bundle), then the desktop app's (ORCA_USER_DATA_PATH, else
+ * ~/Library/Application Support/orca on macOS and ${XDG_CONFIG_HOME:-~/.config}/orca elsewhere:
+ * the CLI's `ph()`).
  */
 export function profileCandidates(env: Env, home: string, platform: NodeJS.Platform, flag?: string): string[] {
+  const named = flag || env.CC_REMOTE_ORCA_PROFILE;
+  if (named) return [resolve(named)];
   const list = [
-    flag,
-    env.CC_REMOTE_ORCA_PROFILE,
     env.ORCA_USER_DATA,
     env.XDG_DATA_HOME ? join(env.XDG_DATA_HOME, "Orca") : undefined,
     join(home, ".orca"),
@@ -125,7 +128,7 @@ export function call(rt: Runtime, method: string, params: unknown = {}, timeoutM
         }
         if (frame?._keepalive === true) continue;
         if (frame?.id !== id || frame?._meta?.runtimeId !== rt.runtimeId) return finish(new OrcaError("the Orca Server runtime changed"));
-        if (frame.ok !== true) return finish(new OrcaError(`Orca Server refused ${method}: ${frame.error?.message ?? "no reason given"}`));
+        if (frame.ok !== true) return finish(new OrcaError(`Orca Server refused ${method}: ${frame.error?.message ?? "no reason given"}`, frame.error?.code, frame.error?.data));
         return finish(undefined, frame.result);
       }
     });
@@ -133,7 +136,7 @@ export function call(rt: Runtime, method: string, params: unknown = {}, timeoutM
 }
 
 /** Waits until the runtime's workspace graph is ready, as Orca's own clients do (10 s). */
-export async function ready(rt: Runtime, timeoutMs = 10_000, wait = (ms: number) => Bun.sleep(ms)): Promise<{ appVersion?: string; graphStatus?: string } | undefined> {
+export async function ready(rt: Runtime, timeoutMs = 10_000, wait = (ms: number) => Bun.sleep(ms)): Promise<{ appVersion?: string; graphStatus?: string; desktopWindowStatus?: string } | undefined> {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
     try {
@@ -145,7 +148,7 @@ export async function ready(rt: Runtime, timeoutMs = 10_000, wait = (ms: number)
   }
 }
 
-export type Discovery = { live: (Runtime & { appVersion?: string })[]; problems: { profile: string; problem: string }[]; installed?: string };
+export type Discovery = { live: (Runtime & { appVersion?: string; desktopWindowStatus?: string })[]; problems: { profile: string; problem: string }[]; installed?: string };
 
 /** Every live Orca runtime of this user's, and the profiles that look like one but aren't usable. */
 export async function discover(env: Env, home: string, platform: NodeJS.Platform, flag?: string): Promise<Discovery> {
@@ -165,7 +168,7 @@ export async function discover(env: Env, home: string, platform: NodeJS.Platform
       continue;
     }
     const status = await ready(found);
-    if (status) out.live.push({ ...found, appVersion: status.appVersion });
+    if (status) out.live.push({ ...found, appVersion: status.appVersion, desktopWindowStatus: status.desktopWindowStatus });
     else out.problems.push({ profile, problem: "Orca Server didn't become ready" });
   }
   const active = readPrivateJson(join(home, ".orca-remote", "orcad-active.json"));

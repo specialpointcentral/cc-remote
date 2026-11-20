@@ -4,13 +4,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { withEntry } from "../src/setup/actions/ssh";
 import {
-  commandDecision, envDecision, hostFileDecision, hostKeyDecision, installDecision, type Mode, type Options, parseArgs, permissionDecision, redactDecision, sshKeyDecision,
+  commandDecision, envDecision, hostFileDecision, hostKeyDecision, installDecision, type Mode, type Options, parseArgs, permissionDecision, pluginDecision, redactDecision, sshKeyDecision,
   UsageError,
 } from "../src/setup/args";
 import { remoteChecks } from "../src/setup/checks/remote";
 import { lock, readPrivateJson, writePrivateJson } from "../src/setup/files";
 import { pushHistory, readHistory } from "../src/setup/history";
-import { call, inspect, normalizeCommand, permissionOf, profileCandidates, validateCommand, versionSupport } from "../src/setup/orca";
+import { call, discover, inspect, normalizeCommand, permissionOf, profileCandidates, validateCommand, versionSupport } from "../src/setup/orca";
 import { chooseManager, installPlan, type Machine, mergePlans, parseOsRelease } from "../src/setup/os";
 import { classifySsh, parseAuth, parseProbe, parseSshd, probeScript, saveScript } from "../src/setup/remote-probe";
 import { commandKind } from "../src/setup/steps/orca";
@@ -46,6 +46,19 @@ describe("flags and consent", () => {
     expect(installDecision(opts(["--install"]), TTY)).toBe("ask-no");
     expect(installDecision(opts([]), TTY)).toBe("ask-no");
     expect(installDecision(opts(["--install"]), CHECK)).toBe("skip");
+  });
+
+  test("the Orca usage plugin is checked first and requires its own installation consent", () => {
+    expect(opts(["--orca-plugin", "install"]).orcaPlugin).toBe("install");
+    expect(() => opts(["--orca-plugin", "unknown"])).toThrow(UsageError);
+    expect(() => opts(["--check", "--orca-plugin", "install"])).toThrow(UsageError);
+    expect(() => opts(["--orca", "skip", "--orca-plugin", "install"])).toThrow(UsageError);
+    expect(pluginDecision(opts(["--yes", "--install"]), BATCH, false)).toBe("skip");
+    expect(pluginDecision(opts(), TTY, false)).toBe("ask-no");
+    expect(pluginDecision(opts(["--orca-plugin", "install"]), BATCH, false)).toBe("do");
+    expect(pluginDecision(opts(["--orca-plugin", "skip"]), TTY, false)).toBe("skip");
+    expect(pluginDecision(opts(), TTY, true)).toBe("skip");
+    expect(pluginDecision(opts(), CHECK, false)).toBe("skip");
   });
 
   test("the Claude Command changes unattended only from Orca's default or another cc-remote, unless --orca set", () => {
@@ -399,8 +412,28 @@ describe("Orca", () => {
   });
 
   test("profile candidates: flag, env, orcad's, then the desktop app's", () => {
-    expect(profileCandidates({ ORCA_USER_DATA: "/o", XDG_DATA_HOME: "/d", XDG_CONFIG_HOME: "/c" }, "/h", "linux", "/f")).toEqual(["/f", "/o", "/d/Orca", "/h/.orca", "/c/orca"]);
+    expect(profileCandidates({ ORCA_USER_DATA: "/o", XDG_DATA_HOME: "/d", XDG_CONFIG_HOME: "/c" }, "/h", "linux")).toEqual(["/o", "/d/Orca", "/h/.orca", "/c/orca"]);
+    // A profile named is the only one: not another that happens to run.
+    expect(profileCandidates({ ORCA_USER_DATA: "/o" }, "/h", "linux", "/f")).toEqual(["/f"]);
+    expect(profileCandidates({ CC_REMOTE_ORCA_PROFILE: "/e", ORCA_USER_DATA: "/o" }, "/h", "darwin")).toEqual(["/e"]);
     expect(profileCandidates({}, "/h", "darwin")).toEqual(["/h/.orca", "/h/Library/Application Support/orca"]);
+  });
+
+  test("discovery looks at a named profile alone: a stopped one finds nothing, though another runs", async () => {
+    const running = mkdtempSync(join(tmpdir(), "ccr-o-b-"));
+    const stopped = mkdtempSync(join(tmpdir(), "ccr-o-a-"));
+    const orca = fakeOrca(running);
+    try {
+      const env = { ORCA_USER_DATA: running };
+      expect((await discover(env, "/nonexistent-home", "darwin")).live.map((r) => r.profile)).toEqual([running]);
+      expect((await discover({ ...env, CC_REMOTE_ORCA_PROFILE: stopped }, "/nonexistent-home", "darwin")).live).toEqual([]);
+      expect((await discover(env, "/nonexistent-home", "darwin", stopped)).live).toEqual([]);
+      expect((await discover(env, "/nonexistent-home", "darwin", running)).live.map((r) => r.profile)).toEqual([running]);
+    } finally {
+      orca.stop();
+      rmSync(running, { recursive: true, force: true });
+      rmSync(stopped, { recursive: true, force: true });
+    }
   });
 
   test("discovery refuses unsafe profiles, dead pids and missing sockets; RPC skips keepalives and checks the runtime", async () => {
@@ -411,6 +444,8 @@ describe("Orca", () => {
       expect(rt && "endpoint" in rt).toBe(true);
       if (!rt || !("endpoint" in rt)) return;
       expect((await call(rt, "status.get")).graphStatus).toBe("ready");
+      const unknown = await call(rt, "plugins.not-a-method").catch((e) => e);
+      expect(unknown.code).toBe("method_not_found");
       await expect(call(rt, "settings.mutateAgentLaunch", { type: "command", agent: "claude", value: "x", extra: 1 })).rejects.toThrow(/refused settings.mutateAgentLaunch: Unrecognized key/);
       await expect(call({ ...rt, runtimeId: "other" }, "status.get")).rejects.toThrow(/runtime changed/);
       await expect(call({ ...rt, token: "wrong" }, "status.get")).rejects.toThrow();

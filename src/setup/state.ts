@@ -8,7 +8,7 @@ import { readPrivateJson, writePrivateJson } from "./files";
  */
 export type ActionId =
   | "local.install" | "local.hostfile" | "local.redact" | "ssh.keygen" | "ssh.config-block" | "ssh.copy-id"
-  | "remote.marker" | "orca.claude-command" | "orca.permission" | "orca.env";
+  | "remote.marker" | "orca.claude-command" | "orca.permission" | "orca.env" | "orca.usage-plugin";
 
 export type Action = { id: ActionId; at: string; previous?: unknown; value?: unknown; [key: string]: unknown };
 

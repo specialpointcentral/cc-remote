@@ -5,16 +5,21 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Readable } from "node:stream";
 import { F, type Frame, FrameReader, frame, GONE_TOKEN, ProtocolError, RELAY_HASH, RELAY_PATH, RELAY_SOURCE, RelayClient, type RelayEvents } from "../src/relay";
+import { processes } from "./processes";
 
 const RELAY = join(import.meta.dir, "..", "src", "relay.py");
 const dir = mkdtempSync(join(tmpdir(), "cc-remote-relay-"));
 afterAll(() => {
-  // A case that failed half way may have left a daemon running from one of its homes.
-  for (const pid of readdirSync("/proc").filter((p) => /^\d+$/.test(p))) {
-    try {
-      const env = readFileSync(`/proc/${pid}/environ`, "utf8").split("\0");
-      if (env.some((e) => e.startsWith(`HOME=${dir}/`))) process.kill(Number(pid), "SIGKILL");
-    } catch {}
+  // A case that failed half way may have left a daemon running from one of its homes (one case's
+  // is a folder down). Each names its pid in its run folder, and stops what it runs on SIGTERM.
+  const homes = readdirSync(dir).filter((n) => n.startsWith("home-")).flatMap((n) => [n, ...readdirSync(join(dir, n)).map((m) => join(n, m))]);
+  for (const home of homes) {
+    const runs = join(dir, home, ".cc-remote", "run");
+    for (const run of existsSync(runs) ? readdirSync(runs) : []) {
+      try {
+        process.kill(Number(readFileSync(join(runs, run, "pid"), "utf8")), "SIGTERM");
+      } catch {}
+    }
   }
   rmSync(dir, { recursive: true, force: true });
 });
@@ -471,14 +476,8 @@ print(" ".join(sorted(found)))
     h.client.write(text("bbbbbbbbbbbbbbbb\n"));
     await until(() => watches.length === 2);
     const [id2] = watches[1]!;
-    const pid = readdirSync("/proc").filter((p) => /^\d+$/.test(p)).find((p) => {
-      try {
-        return readFileSync(`/proc/${p}/cmdline`, "utf8").includes("monitor\0bbbbbbbbbbbbbbbb");
-      } catch {
-        return false;
-      }
-    });
-    process.kill(Number(pid), "SIGTERM");
+    const [pid] = processes().find(([, cmd]) => cmd.includes("monitor bbbbbbbbbbbbbbbb"))!;
+    process.kill(pid, "SIGTERM");
     await until(() => closed.includes(id2));
     await until(() => h.events.out.endsWith("exit:143\n"));
     h.client.end();

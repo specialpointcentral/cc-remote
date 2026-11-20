@@ -3,7 +3,7 @@ import { chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, s
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { authCache, authCommand, cachedAuth, forgetAuth, rememberAuth } from "../src/auth-cache";
-import { fakeHost } from "./fakehost";
+import { fakeHost, ownHome } from "./fakehost";
 
 const dir = mkdtempSync(join(tmpdir(), "cc-remote-auth-"));
 const saved = { ...authCache };
@@ -44,12 +44,12 @@ describe("auth status cache", () => {
 
   describe("through cc-remote", () => {
     const host = fakeHost(join(dir, "entry"));
-    const cache = join(dir, "entry", "cache");
+    const home = ownHome(join(dir, "entry", "home"));
     const work = join(dir, "work");
     mkdirSync(work, { recursive: true });
     const run = (env: Record<string, string>, ...args: string[]) =>
       Bun.spawnSync(["bun", join(import.meta.dir, "..", "src", "main.ts"), "--host", "box", ...args], {
-        cwd: work, env: { ...Bun.env, ...host.env, XDG_CACHE_HOME: cache, ...env }, stdin: "ignore",
+        cwd: work, env: { ...Bun.env, ...host.env, ...home.env, ...env }, stdin: "ignore",
       });
 
     test("the shim's auth status costs one ssh round trip a minute; logging in or out through cc-remote forgets it", () => {
@@ -84,7 +84,7 @@ describe("auth status cache", () => {
       chmodSync(slow, 0o755);
       const outs = await Promise.all([1, 2, 3].map(async () => {
         const p = Bun.spawn(["bun", join(import.meta.dir, "..", "src", "main.ts"), "--host", "box", "--cli", "auth", "status", "--json"], {
-          cwd: work, env: { ...Bun.env, ...host.env, XDG_CACHE_HOME: cache, CC_REMOTE_SSH: slow }, stdin: "ignore", stdout: "pipe",
+          cwd: work, env: { ...Bun.env, ...host.env, ...home.env, CC_REMOTE_SSH: slow }, stdin: "ignore", stdout: "pipe",
         });
         return new Response(p.stdout).text();
       }));
@@ -99,7 +99,7 @@ describe("auth status cache", () => {
       writeFileSync(failing, "#!/bin/sh\necho 'ssh: connect to host box port 22: Connection refused' >&2\nexit 255\n");
       chmodSync(failing, 0o755);
       expect(run({ CC_REMOTE_SSH: failing }, "--cli", "auth", "status", "--json").exitCode).toBe(255);
-      expect(readdirSync(join(cache, "cc-remote")).filter((n) => n.startsWith("auth-status-") && n.includes(Bun.hash(`box\n${failing}`).toString(36)))).toEqual([]);
+      expect(readdirSync(home.cache).filter((n) => n.startsWith("auth-status-") && n.includes(Bun.hash(`box\n${failing}`).toString(36)))).toEqual([]);
     });
   });
 });

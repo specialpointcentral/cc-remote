@@ -1,15 +1,20 @@
-import { readdirSync, readlinkSync } from "node:fs";
+import { readdirSync, readlinkSync, realpathSync } from "node:fs";
 import { sep } from "node:path";
 
 /**
  * Whether a running process executes a file in a version's folder, so `update` keeps it. A running
  * ACP agent, an Orca chat or claudeShim's script (which names the versioned binary, not the stable
  * path) all pin their version until they end. Linux reads /proc/<pid>/exe, which also shows a file
- * since deleted; macOS asks lsof for each process's executable. Undefined when it can't be told,
- * and then the version is kept.
+ * since deleted; macOS asks lsof for each process's executable. Both name the file by its real
+ * path, so the folder is compared by its real path too: a home reached through a symlink would
+ * otherwise never match. Undefined when it can't be told, and then the version is kept.
  */
 export function inUse(dir: string, platform: NodeJS.Platform = process.platform, run = runSync): boolean | undefined {
-  const prefix = dir.endsWith(sep) ? dir : dir + sep;
+  let real = dir;
+  try {
+    real = realpathSync(dir);
+  } catch {}
+  const prefix = real.endsWith(sep) ? real : real + sep;
   if (platform === "linux") {
     let pids: string[];
     try {

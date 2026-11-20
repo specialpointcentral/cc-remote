@@ -10,7 +10,6 @@ import { projectKey, projectsDir } from "../src/sessions";
 import { hostDir, spawner } from "../src/ssh";
 import { bash } from "../src/tools/bash";
 import { type Workspace, workspace } from "../src/tools/util";
-import { versionCache } from "../src/version";
 import { fakeHost } from "./fakehost";
 import { call, isolate } from "./fixture";
 
@@ -21,13 +20,10 @@ import { call, isolate } from "./fixture";
  */
 
 let iso: ReturnType<typeof isolate>;
-const savedCache = { ...versionCache };
 beforeAll(() => {
   iso = isolate();
-  versionCache.dir = join(iso.home, ".cache", "cc-remote");
 });
 afterAll(() => {
-  Object.assign(versionCache, savedCache);
   iso.restore();
 });
 

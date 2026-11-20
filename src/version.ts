@@ -1,7 +1,7 @@
 import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { WINDOWS } from "./platform";
-import { home } from "./tools/util";
 
 /**
  * The oldest host claude cc-remote starts. Every session leaves out claude's dynamic prompt
@@ -28,17 +28,27 @@ export function tooOld(host: string, output: string): string | undefined {
   return `claude on ${host} is ${version}, older than the ${MIN_CLAUDE} cc-remote needs. Run \`claude update\` on ${host}, then \`cc-remote doctor\`.`;
 }
 
-function cacheRoot(): string {
-  if (WINDOWS) return Bun.env.LOCALAPPDATA ?? join(home, "AppData", "Local");
-  if (process.platform === "darwin") return join(home, "Library", "Caches");
-  return Bun.env.XDG_CACHE_HOME || join(home, ".cache");
+/**
+ * cc-remote's cache folder for an environment, found as layout(env) finds the install: in
+ * ~/Library/Caches on macOS, %LOCALAPPDATA% on Windows, else $XDG_CACHE_HOME or ~/.cache.
+ */
+export function cacheDir(env: Record<string, string | undefined> = process.env, platform: NodeJS.Platform = process.platform): string {
+  const home = env.HOME || env.USERPROFILE || homedir();
+  const root = platform === "win32" ? env.LOCALAPPDATA || join(home, "AppData", "Local")
+    : platform === "darwin" ? join(home, "Library", "Caches")
+    : env.XDG_CACHE_HOME || join(home, ".cache");
+  return join(root, "cc-remote");
 }
 
 /**
  * Each host's `claude --version`, remembered for a while. An app such as Orca asks for the version
  * before every chat, and every session start checks it; neither needs an ssh round trip for that.
+ * `dir` pins the cache folder (tests do); unset, the folder is the environment's at each use.
  */
-export const versionCache = { dir: join(cacheRoot(), "cc-remote"), ttlMs: 10 * 60_000 };
+export const versionCache = { dir: undefined as string | undefined, ttlMs: 10 * 60_000 };
+
+/** The cache folder now, which the auth status, grants, usage and update status share. */
+export const cacheFolder = (env: Record<string, string | undefined> = process.env) => versionCache.dir ?? cacheDir(env);
 
 /**
  * The cache file's format. Older and newer cc-remotes may run side by side and share the cache
@@ -47,7 +57,7 @@ export const versionCache = { dir: join(cacheRoot(), "cc-remote"), ttlMs: 10 * 6
 const FORMAT = 1;
 
 /** The same host through a different ssh command may be another machine. */
-const file = (host: string) => join(versionCache.dir, `claude-version-v${FORMAT}-${Bun.hash(`${host}\n${Bun.env.CC_REMOTE_SSH ?? ""}`).toString(36)}.json`);
+const file = (host: string) => join(cacheFolder(), `claude-version-v${FORMAT}-${Bun.hash(`${host}\n${Bun.env.CC_REMOTE_SSH ?? ""}`).toString(36)}.json`);
 
 /**
  * CC_REMOTE_NO_VERSION_CACHE=1 turns the cache off both ways, so every answer comes live from the
@@ -79,7 +89,7 @@ export async function versionOnce(host: string, ask: () => Promise<string | unde
   let held = false;
   if (!disabled()) {
     try {
-      mkdirSync(versionCache.dir, { recursive: true, mode: 0o700 });
+      mkdirSync(cacheFolder(), { recursive: true, mode: 0o700 });
       // One left by a probe that was killed: the next one takes over.
       if (existsSync(lock) && Date.now() - statSync(lock).mtimeMs > 15_000) rmSync(lock, { force: true });
       closeSync(openSync(lock, "wx", 0o600));
@@ -104,7 +114,7 @@ export async function versionOnce(host: string, ask: () => Promise<string | unde
 export function rememberVersion(host: string, output: string, now = Date.now()) {
   if (!versionNumber(output) || disabled()) return;
   try {
-    mkdirSync(versionCache.dir, { recursive: true, mode: 0o700 });
+    mkdirSync(cacheFolder(), { recursive: true, mode: 0o700 });
     const path = file(host);
     const temp = `${path}.${process.pid}`;
     writeFileSync(temp, JSON.stringify({ format: FORMAT, output: output.trim(), at: now }), { mode: 0o600 });

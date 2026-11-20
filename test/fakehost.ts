@@ -1,5 +1,16 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { cacheDir } from "../src/version";
+
+/**
+ * The environment for a cc-remote run with a home of its own here, so its caches stay in it: macOS
+ * keeps them in ~/Library/Caches whatever XDG_CACHE_HOME says, so a run with the user's home would
+ * read and write the user's. `cache` is cc-remote's cache folder there.
+ */
+export function ownHome(home: string) {
+  const env = { HOME: home, XDG_CACHE_HOME: join(home, ".cache") };
+  return { env, cache: cacheDir(env) };
+}
 
 /** How the fake claude prints the settings every launch adds, after the caller's arguments: agent teams off. */
 export const TEAMS_OFF = ' [--settings] [{"env":{"CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS":"0"}}]';

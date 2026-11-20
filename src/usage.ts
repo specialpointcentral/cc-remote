@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { readPrivateJson, writePrivateJson } from "./setup/files";
-import { versionCache } from "./version";
+import { cacheFolder } from "./version";
 
 /** The four cumulative token counters Claude reports per model. */
 export type TokenTotals = { input: number; output: number; cacheRead: number; cacheWrite: number };
@@ -17,7 +17,7 @@ type Kind = "session" | "account" | "model";
  * same sha256, and refreshes in Orca's environment, which may lack the CC_REMOTE_SSH of sessions.
  */
 const cacheFile = (kind: Kind, host: string) =>
-  join(Bun.env.CC_REMOTE_USAGE_CACHE_DIR || versionCache.dir, `${kind}-usage-v1-${createHash("sha256").update(host).digest("hex").slice(0, 24)}.json`);
+  join(Bun.env.CC_REMOTE_USAGE_CACHE_DIR || cacheFolder(), `${kind}-usage-v1-${createHash("sha256").update(host).digest("hex").slice(0, 24)}.json`);
 
 /** A finite number from 0 to `max`. */
 const amount = (n: unknown, max = Infinity): n is number => typeof n === "number" && Number.isFinite(n) && n >= 0 && n <= max;

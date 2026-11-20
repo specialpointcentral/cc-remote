@@ -1,4 +1,4 @@
-import { afterAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -15,7 +15,7 @@ import { chooseManager, installPlan, type Machine, mergePlans, parseOsRelease } 
 import { classifySsh, parseAuth, parseProbe, parseSshd, probeScript, saveScript } from "../src/setup/remote-probe";
 import { commandKind } from "../src/setup/steps/orca";
 import { cleanHost, closest, completer, knownHosts, parseFlagged, sshConfigHosts } from "../src/setup/suggest";
-import { detectLang } from "../src/setup/ui/i18n";
+import { detectLang, setLang } from "../src/setup/ui/i18n";
 import { Progress } from "../src/setup/ui/progress";
 import { Term } from "../src/setup/ui/term";
 import { cachedVersion, rememberVersion, versionCache } from "../src/version";
@@ -23,6 +23,8 @@ import { fakeOrca } from "./fakeorca";
 
 const dir = mkdtempSync(join(tmpdir(), "ccr-units-"));
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
+// The language is the process's: a setup or update run in an earlier file may have left it zh.
+beforeEach(() => setLang("en"));
 
 const opts = (argv: string[] = []): Options => parseArgs(argv);
 const TTY: Mode = { interactive: true, check: false };

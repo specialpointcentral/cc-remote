@@ -146,4 +146,10 @@ describe("ssh", () => {
     expect(cmd).toContain("'.cc-remote/ws/");
     expect(cmd).toEndWith(`exec env 'A=1' claude '--model' 'x y'`);
   });
+  test("enters no folder for a command that needs none", () => {
+    const cmd = remoteCommand(["--version"], {}, undefined);
+    expect(cmd).not.toContain(".cc-remote/ws/");
+    expect(cmd).not.toContain("mkdir");
+    expect(cmd).toEndWith(`exec env  claude '--version'`);
+  });
 });

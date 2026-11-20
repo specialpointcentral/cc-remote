@@ -103,20 +103,21 @@ const enter = (cwd: string) => {
 export type RelayStart = { id: string; sessionId?: string; grace: number; idle: number };
 
 /**
- * The shell command the host runs: enter the folder, run `check` when given, then exec claude.
+ * The shell command the host runs: enter the folder (none for a command that needs no folder, such
+ * as the usage query), run `check` when given, then exec claude.
  * With `relay`, claude starts under the relay when the check found a python3 for it ($py).
  * Under redaction (redact.ts) this machine's values in claude's arguments, in the variables' values
  * and in the folder's name are placeholders, while the command around them stays as it is; and
  * claude doesn't get the ssh session's variables, which hold this machine's address.
  */
-export function remoteCommand(args: string[], env: Record<string, string>, cwd: string, check?: string, relay?: RelayStart): string {
+export function remoteCommand(args: string[], env: Record<string, string>, cwd: string | undefined, check?: string, relay?: RelayStart): string {
   const r = redaction();
   if (!r.on) return plainCommand(args, env, cwd, check, relay);
   const vars = Object.fromEntries(Object.entries(env).map(([k, v]) => [k, r.value(v)]));
   return `unset SSH_CONNECTION SSH_CLIENT SSH_TTY; ${plainCommand(r.args(args), vars, cwd, check, relay)}`;
 }
 
-function plainCommand(args: string[], env: Record<string, string>, cwd: string, check?: string, relay?: RelayStart): string {
+function plainCommand(args: string[], env: Record<string, string>, cwd: string | undefined, check?: string, relay?: RelayStart): string {
   const vars = Object.entries(env).map(([k, v]) => quote(`${k}=${v}`));
   const claude = `env ${vars.join(" ")} claude ${args.map(quote).join(" ")}`;
   let start = `${REMOTE_PATH} exec ${claude}`;
@@ -125,7 +126,7 @@ function plainCommand(args: string[], env: Record<string, string>, cwd: string, 
     const options = `${relay.id}${session} --grace ${relay.grace} --idle ${relay.idle}`;
     start = `if [ -n "$py" ]; then ${REMOTE_PATH} exec "$py" -S "$HOME"/${quote(RELAY_PATH)} run ${options} -- ${claude}; else ${start}; fi`;
   }
-  return `${enter(cwd)} && ${check ? `${check} && ` : ""}${start}`;
+  return `${cwd === undefined ? "" : `${enter(cwd)} && `}${check ? `${check} && ` : ""}${start}`;
 }
 
 /** The shell command that attaches to a relay again: its line, then the relay's frames. */
@@ -405,6 +406,6 @@ export function spawner(host: string, cwd: string, env: Record<string, string>, 
     const plugins = hostPlugins(options.args, cwd);
     const child = launch(host, cwd, plugins.args, { ...added, ...env }, plugins.uploads, options.signal, tellTools(host, ws), hooks?.host);
     const mode = argument(options.args, "--permission-mode") ?? "default";
-    return proxy(asChild(child), { cwd, hostDir: hostDir(cwd), mode, ws, sessionId: grantsSession(options.args), hooks });
+    return proxy(asChild(child), { host, cwd, hostDir: hostDir(cwd), mode, ws, sessionId: grantsSession(options.args), hooks });
   };
 }

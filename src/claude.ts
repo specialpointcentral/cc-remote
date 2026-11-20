@@ -117,7 +117,7 @@ export async function claudeCompat(host: string, argv: string[]): Promise<void> 
   // The hooks of this machine's settings: run here, or by the host claude through its --settings.
   const hooks = sessionHooks(cwd, plan.args, ws);
   const child = launch(host, cwd, plan.args, { ...env, CLAUDE_CODE_DISABLE_CLAUDE_MDS: "1" }, plan.uploads, undefined, tellTools(host, ws), hooks.host);
-  const session = { cwd, hostDir: hostDir(cwd), mode: plan.mode, dirs: plan.addDirs, ws, sessionId: grantsSession(plan.args), hooks };
+  const session = { host, cwd, hostDir: hostDir(cwd), mode: plan.mode, dirs: plan.addDirs, ws, sessionId: grantsSession(plan.args), hooks };
   const notAll = init?.id && listed?.leftOut ? notAllApplied(init.id) : undefined;
   const sdk = proxy(asChild(child), session, (toClaude) => {
     const layer = sdkHost(servers, prompt, toClaude);

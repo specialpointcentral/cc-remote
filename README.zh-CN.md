@@ -161,6 +161,16 @@ Claude Command 指向 `~/.local/bin/cc-remote`，因此永远不需要修改。�
 更新会停止（服务器连不上时，`--skip-host-check` 可以照样切换）。旧版本在没有任何进程使用后才会删除，
 上一个版本会保留以便 `--rollback`。cc-remote 从不自动更新；有新版本时 `setup` 会提示。
 
+## 查看用量
+
+在终端运行 `cc-remote usage`，会通过远端 Claude 查询订阅的五小时、七日和可用的模型专属额度，以及它们的重置时间。
+命令还会显示本机最近完成的 cc-remote 会话的累计 Token 用量和记录时间；尚未记录时会明确显示没有数据。
+这是最近一个完成回合的会话，不是所有会话之和。需要查询另一台服务器时可使用 `cc-remote --host <your-server> usage`。
+查询失败时会显示之前保存的额度及各自的记录时间，并以状态码 1 退出。
+
+Token 数来自 Claude 的 `modelUsage`，包含其查询流程中的子代理和辅助调用；它们不是订阅额度百分比，
+也不是账单。cc-remote 只在本机私有缓存中保存数字、会话标识和时间，不保存对话文本或远端登录凭据。
+
 ## 使用
 
 装好 cc-remote 后，任何支持 ACP 的客户端都能用。添加一个命令为 `cc-remote --host <your-server>` 的 agent

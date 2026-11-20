@@ -299,11 +299,11 @@ describe("cc-remote update", () => {
   test("--version installs that release, older ones too", async () => {
     release("0.1.5");
     const h = home(["0.2.0"]);
-    const r = await update(h, ["--version", "v0.1.5"]);
+    const r = await update(h, ["v0.1.5"]);
     expect(r.code).toBe(0);
     expect(current(h)).toBe("0.1.5");
     expect(install(h)).toMatchObject({ current: "0.1.5", previous: "0.2.0" });
-    expect((await update(h, ["--version", "nope"])).code).toBe(2);
+    expect((await update(h, ["--release=nope"])).code).toBe(2);
   });
 
   test("--check shows both versions and changes nothing", async () => {

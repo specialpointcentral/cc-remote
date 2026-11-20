@@ -298,10 +298,25 @@ describe("cc-remote update from source", () => {
     expect(updateStatus()).toMatchObject({ current: "0.1.0-aaaaaaa", latest: `0.2.0-${c.head}` });
   });
 
-  test("--version without --release, and --source with --release, are refused", async () => {
+  test("--version isn't update's (cc-remote --version is the version), and --source doesn't go with --release", async () => {
     const h = home();
     expect((await update(h, ["--version", "0.3.0"])).code).toBe(2);
     expect((await update(h, ["--release", "--source", h.source])).code).toBe(2);
+    expect((await update(h, ["--release", "0.3.0", "--check"])).code).toBe(2);
+  });
+
+  test("--host names the server the new build is checked against, as the global flag does; setup passes on its own", async () => {
+    expect(updateArgs({ orca: "auto", orcaPlugin: "auto" }, "en", undefined, "central")).toEqual(["--lang", "en", "--host", "central"]);
+    const h = home({ managed: "0.1.0-aaaaaaa" });
+    const echo = async (_source: string, _env: unknown, _say: unknown, out: string) => {
+      writeFileSync(out, `#!/bin/sh\ncase "$1" in\n  --version) echo "0.2.0-bbbbbbb (cc-remote, claude-agent-acp 0.99.1, usage plugin 0.4.0)";;\n  doctor) [ "$CC_REMOTE_HOST" = other-server ] || { echo "remote claude: on $CC_REMOTE_HOST"; exit 1; };;\nesac\n`, { mode: 0o755 });
+      return out;
+    };
+    // Its doctor passes only on that server: the switch shows the check went there.
+    const r = await update(h, ["--source", h.source, "--host", "other-server"], echo);
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("Checking other-server with the new version");
+    expect(current(h)).toBe("0.2.0-bbbbbbb");
   });
 });
 

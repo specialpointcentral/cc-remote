@@ -54,7 +54,7 @@ Nothing is installed or changed without asking; safe to run again.
   --smoke                      afterwards, send one tiny real prompt (costs tokens)
   --lang en|zh                 language ($CC_REMOTE_LANG, else from the locale)
   --no-progress, --no-color    plain output ($CC_REMOTE_NO_PROGRESS=1, $NO_COLOR)
-  -v, --verbose                show passing details too`,
+  --verbose                    show passing details too`,
   zh: `用法：cc-remote setup [--host <目标>] [选项]   检查、连接、配置、验证
       cc-remote setup --check                  只验证，不做任何改动
 
@@ -81,15 +81,16 @@ Nothing is installed or changed without asking; safe to run again.
   --smoke                      最后发送一次很小的真实提问（消耗 token）
   --lang en|zh                 语言（$CC_REMOTE_LANG，否则按 locale）
   --no-progress, --no-color    纯文本输出（$CC_REMOTE_NO_PROGRESS=1、$NO_COLOR）
-  -v, --verbose                也显示通过项的详情`,
+  --verbose                    也显示通过项的详情`,
 };
 
 /**
- * The arguments for an update setup runs: its plugin step goes to the Orca setup went by, and,
- * when setup was told to leave the plugin or Orca alone, so is the update.
+ * The arguments for an update setup runs: it checks the server setup went by, its plugin step goes
+ * to the Orca setup went by, and, when setup was told to leave the plugin or Orca alone, so is the update.
  */
-export const updateArgs = (o: Pick<Options, "orca" | "orcaPlugin">, language: string, profile: string | undefined) => [
+export const updateArgs = (o: Pick<Options, "orca" | "orcaPlugin">, language: string, profile: string | undefined, host?: string) => [
   "--lang", language,
+  ...(host ? ["--host", host] : []),
   ...(profile ? ["--orca-profile", profile] : []),
   ...(o.orca === "skip" || o.orcaPlugin === "skip" ? ["--orca-plugin", "skip"] : []),
 ];
@@ -165,7 +166,7 @@ async function run(ctx: Ctx, notice: Promise<void>): Promise<number> {
     // summary() printed the notice; only someone at a terminal is asked, and no is the default.
     let updated = 0;
     if (ctx.mode.interactive && updateNotice(lang() === "zh", ctx.env) && (await ctx.prompt.yesNo(t("Build and install it now?", "现在编译并安装？"), false))) {
-      updated = await update(updateArgs(o, lang(), orcaProfile), { env: ctx.env, out: { write: (s: string) => { for (const line of s.replace(/\n$/, "").split("\n")) ctx.term.line(line); } } });
+      updated = await update(updateArgs(o, lang(), orcaProfile, host), { env: ctx.env, out: { write: (s: string) => { for (const line of s.replace(/\n$/, "").split("\n")) ctx.term.line(line); } } });
     }
     if (!o.check && (code === 0 || ctx.actions.length)) {
       const c = counts(ctx);

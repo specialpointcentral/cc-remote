@@ -179,7 +179,7 @@ cc-remote update --check          # the installed build and the source checkout'
 cc-remote update                  # build the checkout, install the build and switch to it
 cc-remote update --source <dir>   # build another checkout ($CC_REMOTE_SOURCE also names one)
 cc-remote update --rollback       # back to the previous version
-cc-remote update --release        # install a GitHub release instead (--version 0.3.1: that one)
+cc-remote update --release [0.3.1] # install a GitHub release instead: the latest, or that one
 ```
 
 Updates come from the source checkout a binary was built from: each build's id is package.json's
@@ -343,10 +343,17 @@ cc-remote [--host <host>]                    speak ACP on stdio (what your clien
 cc-remote [--host <host>] doctor             check ssh and the remote claude version
 cc-remote [--host <host>] --cli <args...>    run `claude <args...>` on the server
 cc-remote [--host <host>] claude <args...>   stand in for `claude` under an Agent SDK app, such as Orca
-cc-remote setup [--check] [options]          set up this machine, the server and Orca; see Setup
-cc-remote update [--check | --rollback]      build the source checkout and switch to it; see Update
+cc-remote [--host <host>] usage              the remote Claude's limits and the last session's tokens
+cc-remote [--host <host>] setup [--check]    set up this machine, the server and Orca; see Setup
+cc-remote [--host <host>] update [--check]   build the source checkout and switch to it; see Update
 cc-remote --version | --help
 ```
+
+Flags mean the same in every command. The global ones (`--host`, `-h`/`--help`, `-v`/`--version`)
+go to the command after them, and no command uses them for anything else. The only short flags are
+`-h`, `-v` (the version) and `-y` (no prompts). `--check` never changes anything. A choice takes
+`auto` for the default and `skip` to leave a thing alone (`--orca`, `--orca-plugin`, `--ssh-key`). A
+flag that also has an environment variable has it named `CC_REMOTE_<FLAG>`, and the flag wins.
 
 ## Behavior
 

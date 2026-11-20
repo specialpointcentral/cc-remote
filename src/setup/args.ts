@@ -75,7 +75,7 @@ export function parseArgs(argv: string[], env: Record<string, string | undefined
       case "--lang": o.lang = choice(flag, value(), ["en", "zh"] as const); break;
       case "--no-progress": o.noProgress = true; break;
       case "--no-color": o.noColor = true; break;
-      case "-v": case "--verbose": o.verbose = true; break;
+      case "--verbose": o.verbose = true; break;
       case "-h": case "--help": o.help = true; break;
       default: throw new UsageError(`unknown argument ${a}`);
     }

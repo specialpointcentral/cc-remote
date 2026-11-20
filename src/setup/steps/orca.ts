@@ -1,5 +1,5 @@
-import { accessSync, constants, realpathSync } from "node:fs";
-import { basename } from "node:path";
+import { accessSync, constants, existsSync, realpathSync } from "node:fs";
+import { basename, join } from "node:path";
 import { installed, layout } from "../../install/layout";
 import { type CommandKind, commandDecision, type Decision, envDecision, permissionDecision } from "../args";
 import type { Check, Ctx } from "../context";
@@ -9,6 +9,7 @@ import {
 } from "../orca";
 import { endStep, width } from "../report";
 import { t } from "../ui/i18n";
+import { checkAndInstallUsagePlugin, pluginUnreachable } from "../orca-plugin";
 
 /**
  * Step 6, Orca Server on this machine: its Claude Command, the permission mode of its Claude
@@ -17,6 +18,12 @@ import { t } from "../ui/i18n";
  * read back, and its previous value is recorded.
  */
 export type OrcaResult = { runtime?: Runtime; command?: string; envNames: string[] };
+
+/** Recognize a desktop app in the common macOS install locations even if it is closed. */
+export function installedDesktopApp(home: string, exists = existsSync): string | undefined {
+  return ["/Applications/Orca.app", join(home, "Applications", "Orca.app")]
+    .find((app) => exists(join(app, "Contents", "Info.plist")));
+}
 
 /** The variables cc-remote reads that Orca Server, which doesn't read shell profiles, may lack. */
 export const ENV_NAMES = ["CC_REMOTE_SSH", "CC_REMOTE_CONTROL_PERSIST", "CC_REMOTE_KEEPALIVE_TIMEOUT"];
@@ -83,21 +90,25 @@ export async function stepOrca(ctx: Ctx, autoOffered: boolean | undefined): Prom
     say(`${next}${" ".repeat(col - width(next))}${nextValue}`);
   };
   if (ctx.platform === "win32") {
-    endStep(ctx, "orca", [{ id: "O1", status: "info", label: "Orca", detail: t("setup doesn't configure Orca on Windows yet", "setup 暂不支持在 Windows 上配置 Orca") }], "Orca Server", t("not supported on Windows yet", "暂不支持 Windows"));
+    const detail = t("setup doesn't configure Orca on Windows yet", "setup 暂不支持在 Windows 上配置 Orca");
+    endStep(ctx, "orca", [{ id: "O1", status: "info", label: "Orca", detail }, ...pluginUnreachable(ctx.o, detail)], "Orca Server", t("not supported on Windows yet", "暂不支持 Windows"));
     return out;
   }
   const found = await discover(ctx.env, ctx.home, ctx.platform, ctx.o.orcaProfile);
   const problems: Check[] = found.problems.map((p) => ({ id: "O1", status: "warn", label: "Orca", detail: `${ctx.tilde(p.profile)}: ${p.problem}` }));
   if (!found.live.length) {
-    const detail = found.installed ? t(`Orca Server ${found.installed} is installed but not running`, `Orca Server ${found.installed} 已安装但没有运行`) : t("not running here", "本机没有运行");
-    endStep(ctx, "orca", [...problems, { id: "O1", status: "info", label: "Orca", detail }], ctx.mode.check ? "Orca" : "Orca Server", detail);
+    const desktop = ctx.platform === "darwin" ? installedDesktopApp(ctx.home) : undefined;
+    const detail = desktop ? t("the Orca desktop app is installed but not running", "Orca 桌面应用已安装，但没有运行")
+      : found.installed ? t(`Orca Server ${found.installed} is installed but not running`, `Orca Server ${found.installed} 已安装但没有运行`)
+      : t("no running Orca found here", "未发现本机运行中的 Orca");
+    endStep(ctx, "orca", [...problems, { id: "O1", status: "info", label: "Orca", detail }, ...pluginUnreachable(ctx.o, detail)], ctx.mode.check ? "Orca" : "Orca Server", detail);
     return out;
   }
   let rt = found.live[0]!;
   if (found.live.length > 1) {
     if (!ctx.mode.interactive) {
       const detail = t(`${found.live.length} Orca Servers are running (${found.live.map((r) => ctx.tilde(r.profile)).join(", ")}); pass --orca-profile`, `有 ${found.live.length} 个 Orca Server 在运行（${found.live.map((r) => ctx.tilde(r.profile)).join("、")}）；请传入 --orca-profile`);
-      endStep(ctx, "orca", [{ id: "O1", status: "warn", label: "Orca", detail }], ctx.mode.check ? "Orca" : "Orca Server", detail);
+      endStep(ctx, "orca", [{ id: "O1", status: "warn", label: "Orca", detail }, ...pluginUnreachable(ctx.o, detail)], ctx.mode.check ? "Orca" : "Orca Server", detail);
       return out;
     }
     found.live.forEach((r, i) => ctx.progress.say(`  ${i + 1}) ${ctx.tilde(r.profile)}  ${r.appVersion ?? ""}`));
@@ -197,6 +208,7 @@ export async function stepOrca(ctx: Ctx, autoOffered: boolean | undefined): Prom
         checks.push({ id: "O5", label: t("environment", "环境"), status: "warn", detail: t(`${missing.join(", ")} is set here but not in Orca's Claude environment`, `${missing.join("、")} 在这里设置了，但 Orca 的 Claude 环境变量中没有`), remedy: [t("Fix: cc-remote setup --orca-env", "修复：cc-remote setup --orca-env")] });
       }
     }
+    checks.push(await checkAndInstallUsagePlugin(ctx, (method, params, timeoutMs) => call(rt, method, params, timeoutMs), rt.appVersion, rt.desktopWindowStatus, rt.profile));
   } catch (e) {
     if (!(e instanceof OrcaError)) throw e;
     checks.push({ id: "O1", label: "Orca", status: "fail", detail: e.message });
@@ -208,7 +220,9 @@ export async function stepOrca(ctx: Ctx, autoOffered: boolean | undefined): Prom
       ? t("Orca Server: Claude Command and permission mode already set", "Orca Server：Claude Command 和权限模式均已设置")
       : "Orca Server";
   const both = checks.some((c) => c.id === "O3" && c.status === "pass") && checks.some((c) => c.id === "O4" && c.status === "pass");
-  const summary = ctx.mode.check && both ? t("Claude Command and permission mode set", "Claude Command 和权限模式均已设置") : "";
+  const plugin = checks.find((c) => c.id === "O6" && c.status === "pass");
+  const set = t("Claude Command and permission mode set", "Claude Command 和权限模式均已设置");
+  const summary = ctx.mode.check && both ? (plugin ? `${set}${t("; ", "；")}${plugin.label} ${plugin.detail}` : set) : "";
   endStep(ctx, "orca", checks, ctx.mode.check ? "Orca" : end, status ? undefined : summary);
   return out;
 }

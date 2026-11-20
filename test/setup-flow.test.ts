@@ -175,6 +175,19 @@ describe("aborts on claude", () => {
 });
 
 describe("--check", () => {
+  test("still checks local Orca when no central server is configured", async () => {
+    const w = make({ orca: true });
+    writeFileSync(w.file(".ssh", "config"), "");
+    const before = snapshot(w.home);
+    const r = await runSetup(w, ["--check"], { env: { CC_REMOTE_HOST: "" } });
+    expect(r.code).toBe(1);
+    expect(r.out).toContain("no central server");
+    expect(w.orca!.calls.some((c) => c.method === "status.get")).toBe(true);
+    expect(w.orca!.calls.some((c) => c.method === "settings.getAgentLaunch")).toBe(true);
+    expect(w.orca!.mutations()).toEqual([]);
+    expect(snapshot(w.home)).toEqual(before);
+  }, 30_000);
+
   test("changes nothing: the trees are the same before and after, no Orca change, no installs", async () => {
     const w = make({ orca: true });
     expect((await runSetup(w, ["--yes", "--host", "central"])).code).toBe(0);

@@ -36,13 +36,14 @@ Nothing is installed or changed without asking; safe to run again.
   --check                      read-only: no installs, no prompts that change anything, no writes
   --host <destination>         the central server (ssh host, user@host, ~/.ssh/config alias);
                                else $CC_REMOTE_HOST, the host file, the last one used
-  -y, --yes                    no prompts: take the defaults (never installs anything)
+  -y, --yes                    no prompts: take defaults (installs only with explicit flags)
   --install                    allow installing missing tools here (sudo -n when not root)
   --ssh-key generate|skip      make a key for cc-remote when ssh needs a password or ssh-agent
   --copy-id                    allow ssh-copy-id (asks for the server's password)
   --accept-new-host-key        trust an unknown server key (a changed key is never accepted)
   --orca auto|set|skip         Orca's Claude Command: auto (default) changes it unattended only
                                from Orca's default or another cc-remote; set replaces any; skip
+  --orca-plugin auto|install|skip  check/offer, explicitly install, or skip the trusted usage plugin
   --orca-profile <dir>         Orca's profile folder ($CC_REMOTE_ORCA_PROFILE)
   --orca-env                   copy CC_REMOTE_SSH and friends into Orca's Claude environment
   --orca-permission auto|keep  offer permission mode auto for Orca's Claude chats (default auto)
@@ -62,13 +63,14 @@ Nothing is installed or changed without asking; safe to run again.
   --check                      只读：不安装、不提出会改动任何东西的问题、不写任何文件
   --host <目标>                中心服务器（ssh 主机、user@host、~/.ssh/config 别名）；
                                否则用 $CC_REMOTE_HOST、host 文件、上次使用的值
-  -y, --yes                    不提问：采用默认选择（绝不安装任何东西）
+  -y, --yes                    不提问：采用默认选择（仅按明确的安装选项安装）
   --install                    允许在本机安装缺少的工具（非 root 时用 sudo -n）
   --ssh-key generate|skip      ssh 需要密码或 ssh-agent 时，为 cc-remote 生成密钥
   --copy-id                    允许 ssh-copy-id（会询问服务器密码）
   --accept-new-host-key        信任未知的服务器密钥（绝不接受改变了的密钥）
   --orca auto|set|skip         Orca 的 Claude Command：auto（默认）无人值守时只从 Orca 默认值
                                或其他 cc-remote 路径修改；set 总是替换；skip 不动
+  --orca-plugin auto|install|skip  检查并询问、明确安装、或跳过可信用量插件
   --orca-profile <目录>        Orca 的 profile 目录（$CC_REMOTE_ORCA_PROFILE）
   --orca-env                   把 CC_REMOTE_SSH 等变量复制到 Orca 的 Claude 环境变量
   --orca-permission auto|keep  为 Orca 的 Claude 聊天提供 auto 权限模式（默认 auto）
@@ -167,6 +169,8 @@ async function run(ctx: Ctx, notice: Promise<void>): Promise<number> {
       ctx.progress.begin(t("ssh", "ssh"));
       ctx.progress.end("fail", t("no central server is configured: run cc-remote setup", "尚未配置中心服务器：请运行 cc-remote setup"));
       ctx.results.set("connect", [{ id: "R1", status: "fail", label: "ssh", detail: t("no central server configured", "尚未配置中心服务器") }]);
+      // The local Orca/plugin preflight remains useful even before a host is configured.
+      await stepOrca(ctx, undefined);
     }
     return finish(1);
   }

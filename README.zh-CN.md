@@ -87,7 +87,8 @@ bun link           # 把 cc-remote 加到 PATH，位于 ~/.bun/bin
 
 `bun run compile` 会根据当前机器选择对应的 `build:<os>-<arch>` 脚本。要一次构建所有平台
 （linux-x64、linux-arm64、darwin-arm64、windows-x64、windows-arm64），运行 `bun run build`，产物在 `dist/`。
-从源码安装的用 `git pull && bun run compile` 更新，而不是 `cc-remote update`。
+从源码安装的用 `git pull && bun run compile` 更新，而不是 `cc-remote update`。用量插件的运行文件
+也会编进二进制，所以之后安装插件不需要保留源码目录，也不需要从 GitHub Release 下载插件。
 
 运行 `cc-remote setup`，或者自己指定要用的主机，然后检查连接：
 
@@ -109,7 +110,7 @@ export CC_REMOTE_SSH="ssh -p 2222 -i ~/.ssh/id_ed25519"
 
 ## 设置
 
-`cc-remote setup` 会逐步检查和配置本机的一切，可以放心重复运行（再次运行时只会询问服务器，按回车保留原值）：
+`cc-remote setup` 会逐步检查和配置本机的一切，可以放心重复运行；已有设置会保留，服务器输入直接按回车会保留原值：
 
 1. **本机：** ssh、cc-remote 的安装、ripgrep、登录 shell、git 和主机名。缺少工具时会显示确切的安装命令，
    并先以 `[y/N]` 询问再运行。
@@ -126,7 +127,8 @@ export CC_REMOTE_SSH="ssh -p 2222 -i ~/.ssh/id_ed25519"
 5. **保存：** host 文件 `~/.config/cc-remote/host`，以及服务器上本机的标记，两台项目机器主机名相同时会发出警告。
 6. **本机的 Orca Server**（如果在运行）：把它的 Claude Command 设为 `~/.local/bin/cc-remote claude`，
    为新的 Claude 聊天提供 auto 权限模式（只改 Claude 的，其他 agent 保持不变），还可以把 `CC_REMOTE_SSH`
-   复制到 Orca 的 Claude 环境变量。每项改动都会显示当前值和新值，先询问，再从 Orca 读回确认。
+   复制到 Orca 的 Claude 环境变量。setup 还会先检查 Orca 的版本和桌面窗口、用量插件的安装状态；
+   符合条件且需要安装时，说明插件权限并询问是否安装。每项改动都会先询问，再从 Orca 读回确认。
 7. **端到端：** 按 Orca 的方式运行 Orca 的命令加 `--version`，使用 Orca Server 的环境、不依赖 ssh-agent，
    实时询问服务器。
 
@@ -135,11 +137,14 @@ cc-remote setup                                   # 在终端里交互运行
 cc-remote setup --check                           # 只验证，不做任何改动；有失败时退出码为 1
 cc-remote setup --yes --host <your-server>        # 无人值守，采用默认选择；不安装任何东西
 cc-remote setup --yes --install --host <your-server> --orca set
+cc-remote setup --yes --orca-plugin install       # 明确同意安装内置的 Orca 用量插件
 ```
 
 没有终端或加了 `--yes` 时，setup 只采用安全的选择：写 host 文件和它自己的记录；Orca 的 Claude Command
 只在它是 Orca 默认值或其他 cc-remote 路径时才修改（`--orca set` 总是替换，`--orca skip` 不碰 Orca）；
-权限模式只从 Orca 的默认值修改。只有加 `--install` 才会安装工具，并通过 `sudo -n` 进行。`--smoke`
+权限模式只从 Orca 的默认值修改。只有加 `--install` 才会安装工具，并通过 `sudo -n` 进行；这个选项和
+`--yes` 都不会自动同意安装插件，无人值守安装插件须明确使用 `--orca-plugin install`。`--orca-plugin skip`
+跳过插件，`--orca skip` 跳过所有 Orca 修改。`--smoke`
 会在最后发送一次很小的真实提问，会消耗 token。`cc-remote setup --help` 列出所有选项。提示信息按你的
 locale 或 `--lang` 使用中文或英文。
 
@@ -167,6 +172,18 @@ Claude Command 指向 `~/.local/bin/cc-remote`，因此永远不需要修改。�
 命令还会显示本机最近完成的 cc-remote 会话的累计 Token 用量和记录时间；尚未记录时会明确显示没有数据。
 这是最近一个完成回合的会话，不是所有会话之和。需要查询另一台服务器时可使用 `cc-remote --host <your-server> usage`。
 查询失败时会显示之前保存的额度及各自的记录时间，并以状态码 1 退出。
+
+Orca 1.4.248 及以上可安装 [`orca-usage-plugin/`](orca-usage-plugin/)，在状态栏单独显示远程 Claude
+的五小时额度；在 macOS 上点击条目会打开紧凑浮层，显示进度条、七日及 Fable 等模型额度、
+距离重置的时间以及最近完成会话的 Token 明细。首次打开需要本机 Swift 编译器生成浮层程序；
+弹窗目前仅支持 macOS。进度条按使用速度着色，与 Claude 状态栏的算法一致：不超过按时间均匀使用应达到的
+用量为绿色，超过为黄色，超出剩余空间的 60% 为红色。点击打开时会通过 `cc-remote usage` 刷新远端额度，
+最多每分钟一次；平时用正常对话的 SDK 事件更新额度，显示的数据超过 20 分钟时插件也会自动刷新
+（刷新失败后间隔 30 分钟）。超过 30 分钟或重置时间已过会标为过期。
+插件是以当前用户权限运行的本机可信 worker，可读取 cc-remote 的主机配置和用量缓存，也可运行
+`cc-remote usage` 刷新额度。setup 会先说明权限，并在用户同意后向 Orca 提交授权。需要 macOS、
+Orca 1.4.248 及以上和可用的 Orca 桌面窗口；缺少条件时跳过插件，不影响 cc-remote 本身的安装。
+已禁用的插件不会被自动启用，已安装的较新版本也不会被覆盖。
 
 Token 数来自 Claude 的 `modelUsage`，包含其查询流程中的子代理和辅助调用；它们不是订阅额度百分比，
 也不是账单。cc-remote 只在本机私有缓存中保存数字、会话标识和时间，不保存对话文本或远端登录凭据。

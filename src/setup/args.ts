@@ -20,6 +20,7 @@ export type Options = {
   copyId: boolean;
   acceptNewHostKey: boolean;
   orca: "auto" | "set" | "skip";
+  orcaPlugin: "auto" | "install" | "skip";
   orcaProfile?: string;
   orcaEnv: boolean;
   orcaPermission: "auto" | "keep";
@@ -43,7 +44,7 @@ const choice = <T extends string>(flag: string, value: string, allowed: readonly
 export function parseArgs(argv: string[], env: Record<string, string | undefined> = {}): Options {
   const o: Options = {
     check: false, yes: false, install: false, copyId: false, acceptNewHostKey: false, orca: "auto", orcaEnv: false,
-    orcaPermission: "auto", smoke: false, noProgress: env.CC_REMOTE_NO_PROGRESS === "1", noColor: false, verbose: false, help: false,
+    orcaPlugin: "auto", orcaPermission: "auto", smoke: false, noProgress: env.CC_REMOTE_NO_PROGRESS === "1", noColor: false, verbose: false, help: false,
     orcaProfile: env.CC_REMOTE_ORCA_PROFILE || undefined,
   };
   for (let i = 0; i < argv.length; i++) {
@@ -64,6 +65,7 @@ export function parseArgs(argv: string[], env: Record<string, string | undefined
       case "--copy-id": o.copyId = true; break;
       case "--accept-new-host-key": o.acceptNewHostKey = true; break;
       case "--orca": o.orca = choice(flag, value(), ["auto", "set", "skip"] as const); break;
+      case "--orca-plugin": o.orcaPlugin = choice(flag, value(), ["auto", "install", "skip"] as const); break;
       case "--orca-profile": o.orcaProfile = value(); break;
       case "--orca-env": o.orcaEnv = true; break;
       case "--orca-permission": o.orcaPermission = choice(flag, value(), ["auto", "keep"] as const); break;
@@ -79,6 +81,8 @@ export function parseArgs(argv: string[], env: Record<string, string | undefined
     }
   }
   if (o.check && (o.install || o.smoke)) throw new UsageError(`--check changes nothing, so it can't be combined with ${o.install ? "--install" : "--smoke"}`);
+  if (o.check && o.orcaPlugin === "install") throw new UsageError("--check changes nothing, so it can't be combined with --orca-plugin install");
+  if (o.orca === "skip" && o.orcaPlugin === "install") throw new UsageError("--orca skip can't be combined with --orca-plugin install");
   if (o.check && (o.redact || o.redactNames)) throw new UsageError("--check changes nothing, so it can't be combined with --redact or --redact-names");
   return o;
 }
@@ -97,6 +101,17 @@ export function installDecision(o: Options, m: Mode): Decision {
   if (m.check) return "skip";
   if (m.interactive) return "ask-no";
   return o.install ? "do" : "skip";
+}
+
+/**
+ * Installing the usage plugin (not current, or not there): a trusted Orca plugin requires a separate
+ * affirmative choice, even with --install. One the user disabled (`leftAlone`) is offered only when asked.
+ */
+export function pluginDecision(o: Options, m: Mode, leftAlone: boolean): Decision {
+  if (m.check || o.orca === "skip" || o.orcaPlugin === "skip") return "skip";
+  if (o.orcaPlugin === "install") return "do";
+  if (leftAlone) return "skip";
+  return m.interactive ? "ask-no" : "skip";
 }
 
 /** Writing the host file: asked when it's new or different, unattended allowed. */

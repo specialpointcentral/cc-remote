@@ -100,7 +100,8 @@ bun link           # puts cc-remote on your PATH, in ~/.bun/bin
 `bun run compile` picks the `build:<os>-<arch>` script for the machine you run it on. To build
 every platform at once (linux-x64, linux-arm64, darwin-arm64, windows-x64, windows-arm64), run
 `bun run build`; the binaries land in `dist/`. A source install updates with `git pull && bun run
-compile`, not `cc-remote update`.
+compile`, not `cc-remote update`. The usage plugin's runtime files are embedded in the binary, so
+installing the plugin later needs neither the source checkout nor a GitHub Release download.
 
 Run `cc-remote setup`, or tell it which host to use yourself and check the connection:
 
@@ -123,8 +124,8 @@ If the server isn't logged in yet, run `cc-remote --cli auth login`.
 
 ## Setup
 
-`cc-remote setup` goes through everything on this machine step by step, and is safe to run again
-(a re-run asks only for the server, and Enter keeps it):
+`cc-remote setup` goes through everything on this machine step by step and is safe to run again.
+Existing choices are retained, and Enter keeps the previously selected server:
 
 1. **This machine:** ssh, the cc-remote install, ripgrep, your login shell, git and the hostname. For
    a missing tool it shows the exact install command and asks `[y/N]` before running it.
@@ -143,8 +144,9 @@ If the server isn't logged in yet, run `cc-remote --cli auth login`.
    which warns when two project machines have the same hostname.
 6. **Orca Server on this machine**, if one runs: sets its Claude Command to
    `~/.local/bin/cc-remote claude`, offers permission mode auto for new Claude chats (Claude's only;
-   other agents keep theirs), and can copy `CC_REMOTE_SSH` into Orca's Claude environment. Each
-   change shows the current and the new value, asks first, and is read back from Orca.
+   other agents keep theirs), and can copy `CC_REMOTE_SSH` into Orca's Claude environment. It also
+   checks the Orca version, desktop window and usage plugin, explains the plugin's access, and offers
+   to install it when appropriate. Each change asks first and is read back from Orca.
 7. **End to end:** runs Orca's command with `--version` the way Orca does, in Orca Server's
    environment, without ssh-agent, asking the server live.
 
@@ -153,12 +155,16 @@ cc-remote setup                                   # at a terminal
 cc-remote setup --check                           # verify only, change nothing; exits 1 on a failure
 cc-remote setup --yes --host <your-server>        # unattended, with the defaults; installs nothing
 cc-remote setup --yes --install --host <your-server> --orca set
+cc-remote setup --yes --orca-plugin install       # explicitly approve the bundled Orca usage plugin
 ```
 
 Without a terminal, or with `--yes`, setup takes the safe answers: it writes the host file and its
 own records, changes Orca's Claude Command only from Orca's default or another cc-remote path
 (`--orca set` replaces any command, `--orca skip` leaves Orca alone), and changes the permission mode
-only from Orca's default. It installs tools only with `--install`, through `sudo -n`. `--smoke` ends
+only from Orca's default. It installs tools only with `--install`, through `sudo -n`. Neither
+`--yes` nor `--install` approves the plugin; unattended plugin installation requires the explicit
+`--orca-plugin install` flag. `--orca-plugin skip` skips the plugin and `--orca skip` skips Orca
+changes. `--smoke` ends
 with one tiny real prompt, which costs tokens. `cc-remote setup --help` lists every option. Messages
 are in English or Chinese, following your locale or `--lang`.
 
@@ -191,6 +197,21 @@ model-specific subscription windows and reset times. It also shows the latest co
 counts observed on this machine, with the observation time; this is one session, not an account-wide
 total. Use `cc-remote --host <your-server> usage` to choose another server. When the query fails, it
 shows the windows saved earlier, each with when it was observed, and exits with status 1.
+
+On Orca 1.4.248 and later, [`orca-usage-plugin/`](orca-usage-plugin/) adds a separate status-bar
+item for the remote Claude's five-hour limit. On macOS, click it to open a compact popover with
+progress bars, model-specific limits such as Fable, reset countdowns and the latest session's token
+breakdown. The popover currently supports macOS and requires a local Swift compiler on first launch.
+Bars are coloured by pace, as in a Claude status line: green at or under the even pace for the time
+gone in the window, amber over it, red over it by 60% of the headroom left. Clicking the status-bar
+item refreshes the remote quota through `cc-remote usage`, at most once a minute; normal turns also
+update the account windows, and the plugin refreshes on its own once what it shows is 20 minutes old
+(30 minutes after a failed refresh). Values older than 30 minutes or past their reset are marked
+stale. The trusted worker runs as the current user, can read cc-remote's host configuration
+and usage cache, and can run `cc-remote usage` to refresh the limits. Setup explains this access and
+submits the Orca approval only after your consent. It requires macOS, Orca 1.4.248 or newer and an
+available Orca desktop window; missing prerequisites skip the optional plugin. Setup does not
+automatically enable a disabled plugin or replace a newer installed version.
 
 These `modelUsage` totals include subagents and other query pipeline calls; they are neither a
 quota percentage nor a bill. The private local cache keeps only numbers, session identifier and

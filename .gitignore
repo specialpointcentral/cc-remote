@@ -1,2 +1,4 @@
 node_modules/
 dist/
+# bun build --compile's scratch copies, when a build stops before scripts/compile.ts removes them
+*.bun-build

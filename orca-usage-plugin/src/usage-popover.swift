@@ -17,6 +17,15 @@ struct TokenTotals: Decodable {
     let cacheWrite: Int
 }
 
+/// A newer cc-remote build in its source checkout, and the update the button runs.
+struct UpdateInfo: Decodable {
+    let current: String
+    let latest: String
+    /// "idle", "running", "done", "partial" (cc-remote updated, the plugin not) or "failed".
+    let state: String
+    let message: String?
+}
+
 struct UsageState: Decodable {
     let rows: [UsageRow]
     let tokens: TokenTotals?
@@ -24,6 +33,7 @@ struct UsageState: Decodable {
     let queryFailed: Bool
     /// The central server, said beside the refresh button as Orca's panel says "all agents".
     let host: String?
+    let update: UpdateInfo?
 }
 
 func rgb(_ hex: UInt32) -> NSColor {
@@ -67,11 +77,14 @@ final class Meter: NSView {
     }
 }
 
+/// A button that takes the click which also brings the panel forward.
+class FirstMouseButton: NSButton {
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+}
+
 /// The refresh button of Orca's usage panel: 20 points square, Lucide's refresh-cw at 12 points in
 /// the secondary colour, and while the pointer is over it a rounded backdrop and the full colour.
-final class RefreshButton: NSButton {
-    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
-
+final class RefreshButton: FirstMouseButton {
     convenience init(help: String, target: AnyObject, action: Selector) {
         self.init(frame: NSRect(x: 0, y: 0, width: 20, height: 20))
         title = ""
@@ -234,7 +247,7 @@ final class Popover: NSObject, NSWindowDelegate {
         panel.level = .floating
         panel.hidesOnDeactivate = false
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
-        render(UsageState(rows: [], tokens: nil, querying: true, queryFailed: false, host: nil))
+        render(UsageState(rows: [], tokens: nil, querying: true, queryFailed: false, host: nil, update: nil))
         panel.orderFrontRegardless()
         outsideMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
             guard let self = self else { return }
@@ -269,7 +282,8 @@ final class Popover: NSObject, NSWindowDelegate {
 
     func render(_ state: UsageState) {
         let rows = Array(state.rows.prefix(12))
-        let bodyHeight = CGFloat(max(42, rows.count * 56 + (state.tokens == nil ? 0 : 42)))
+        let banner: CGFloat = state.update == nil ? 0 : 52
+        let bodyHeight = CGFloat(max(42, rows.count * 56 + (state.tokens == nil ? 0 : 42))) + banner
         let height = min(450, bodyHeight + 58)
         let visible = screen.visibleFrame.insetBy(dx: 8, dy: 8)
         let x = min(max(anchor.x - width / 2, visible.minX), max(visible.minX, visible.maxX - width))
@@ -312,8 +326,37 @@ final class Popover: NSObject, NSWindowDelegate {
         scroll.documentView = body
         background.addSubview(scroll)
 
+        if let update = state.update {
+            let top = bodyHeight - 4
+            let failed = update.state == "failed" || update.state == "partial"
+            let heading: String
+            switch update.state {
+            case "running": heading = "正在更新 cc-remote…"
+            case "done": heading = "cc-remote 已更新"
+            case "partial": heading = "cc-remote 已更新，用量插件未更新"
+            case "failed": heading = "cc-remote 更新失败"
+            default: heading = "cc-remote 有新版本"
+            }
+            let title = label(heading, size: 12, weight: .medium, colour: failed ? .systemOrange : .labelColor)
+            title.frame = NSRect(x: 16, y: top - 18, width: width - 112, height: 16)
+            body.addSubview(title)
+            let detail = label(update.message ?? "已安装 \(update.current) → 源码 \(update.latest)", size: 10, colour: .secondaryLabelColor)
+            detail.frame = NSRect(x: 16, y: top - 34, width: width - 112, height: 14)
+            body.addSubview(detail)
+            if update.state == "idle" || failed {
+                let button = FirstMouseButton(title: failed ? "重试" : "更新", target: self, action: #selector(updatePressed))
+                button.bezelStyle = .rounded
+                button.controlSize = .small
+                button.frame = NSRect(x: width - 88, y: top - 32, width: 72, height: 26)
+                body.addSubview(button)
+            }
+            let separator = NSBox(frame: NSRect(x: 16, y: top - 46, width: width - 32, height: 1))
+            separator.boxType = .separator
+            body.addSubview(separator)
+        }
+
         for (index, row) in rows.enumerated() {
-            let top = bodyHeight - CGFloat(index * 56)
+            let top = bodyHeight - banner - CGFloat(index * 56)
             let name = label(row.label, size: 12, weight: .medium)
             name.frame = NSRect(x: 16, y: top - 18, width: 190, height: 16)
             body.addSubview(name)
@@ -350,6 +393,9 @@ final class Popover: NSObject, NSWindowDelegate {
 
     @objc func refreshPressed() {
         FileHandle.standardOutput.write(Data("{\"action\":\"refresh\"}\n".utf8))
+    }
+    @objc func updatePressed() {
+        FileHandle.standardOutput.write(Data("{\"action\":\"update\"}\n".utf8))
     }
     func windowWillClose(_ notification: Notification) { NSApp.terminate(nil) }
 }

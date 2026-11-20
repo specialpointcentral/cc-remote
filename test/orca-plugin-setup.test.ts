@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { bundledPluginFiles, bundledPluginVersion, materializePlugin } from "../src/setup/orca-plugin-bundle";
-import { checkAndInstallUsagePlugin, inspectUsagePlugin, installBundledPlugin, pluginCompatibility } from "../src/setup/orca-plugin";
+import { checkAndInstallUsagePlugin, inspectUsagePlugin, installBundledPlugin, pluginCompatibility, updateInstalledPlugin } from "../src/setup/orca-plugin";
 import { OrcaError } from "../src/setup/orca";
 import { Ctx } from "../src/setup/context";
 import { parseArgs } from "../src/setup/args";
@@ -184,6 +184,30 @@ describe("bundled Orca usage plugin", () => {
     expect(result.status).toBe("warn");
     expect(result.detail).toContain(`0.3.1 is older than ${bundledPluginVersion}`);
     expect(result.remedy?.[0]).toContain("--orca-plugin install");
+  });
+
+  test("updating an installed plugin installs over an older one only, and nothing that isn't there", async () => {
+    let installs = 0;
+    let version = "0.3.1";
+    let status = "running";
+    const rpc = async (method: string, params: any) => {
+      if (method === "plugins.list") return version ? [{ pluginKey: "local.cc-remote-usage", version, status }] : [];
+      installs++;
+      if (!params.approvalFingerprint) throw approval(params.source.path);
+      version = bundledPluginVersion;
+      return { pluginKey: "local.cc-remote-usage", version };
+    };
+    expect(await updateInstalledPlugin(rpc, home(), "darwin", "1.4.259", "available")).toEqual({ ok: true, detail: `updated 0.3.1 → ${bundledPluginVersion}` });
+    expect(installs).toBe(2);
+    expect((await updateInstalledPlugin(rpc, home(), "darwin", "1.4.259", "available")).detail).toContain("current");
+    version = "0.3.1";
+    status = "disabled";
+    expect((await updateInstalledPlugin(rpc, home(), "darwin", "1.4.259", "available")).detail).toContain("left as it is");
+    version = "";
+    const h = home();
+    expect((await updateInstalledPlugin(rpc, h, "darwin", "1.4.259", "available")).detail).toContain("not installed");
+    expect(installs).toBe(2);
+    expect(existsSync(join(h, ".local"))).toBe(false);
   });
 
   test("an explicit install leaves a current, running plugin as it is, recording nothing", async () => {

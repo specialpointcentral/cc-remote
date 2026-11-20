@@ -2,7 +2,7 @@
   "manifestVersion": 2,
   "id": "cc-remote-usage",
   "name": "Remote Claude Usage",
-  "version": "0.4.6",
+  "version": "0.4.8",
   "description": "Shows the configured remote Claude's observed quota and session tokens.",
   "engines": {
     "orca": ">=1.4.248"

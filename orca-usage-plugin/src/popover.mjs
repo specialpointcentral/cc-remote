@@ -1,5 +1,5 @@
-/** Owns only the popover process started by this plugin. */
-export function createPopover(launch, onRefresh) {
+/** Owns only the popover process started by this plugin; `onAction` gets its buttons ("refresh", "update"). */
+export function createPopover(launch, onAction) {
   let child;
   let opening;
   let buffer = '';
@@ -39,7 +39,7 @@ export function createPopover(launch, onRefresh) {
         for (let n; (n = buffer.indexOf('\n')) >= 0;) {
           const line = buffer.slice(0, n);
           buffer = buffer.slice(n + 1);
-          try { if (JSON.parse(line)?.action === 'refresh') onRefresh(); } catch {}
+          try { const action = JSON.parse(line)?.action; if (action === 'refresh' || action === 'update') onAction(action); } catch {}
         }
       });
       update(state);

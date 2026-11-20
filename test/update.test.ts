@@ -87,9 +87,10 @@ function home(versions: string[], options: { host?: string } = {}) {
   return { dir, env, l };
 }
 
+/** Releases come with --release now; building from source is the default (test/update-local.test.ts). */
 async function update(h: ReturnType<typeof home>, argv: string[] = [], self = { compiled: true, execPath: "/opt/cc-remote" }) {
   let out = "";
-  const code = await main(argv, { env: h.env, out: { write: (s: string) => (out += s) }, platform: "linux", self });
+  const code = await main(argv.includes("--rollback") ? argv : ["--release", ...argv], { env: h.env, out: { write: (s: string) => (out += s) }, platform: "linux", self });
   return { code, out };
 }
 

@@ -1,6 +1,7 @@
 import { join } from "node:path";
 import pkg from "../../package.json";
-import { refreshLatest } from "../update/notice";
+import { main as update } from "../update/index";
+import { refreshUpdateStatus, updateNotice } from "../update/notice";
 import { type Options, parseArgs, UsageError } from "./args";
 import { autoOffered } from "./checks/remote";
 import { Ctx, type Io } from "./context";
@@ -14,7 +15,7 @@ import { stepLocal } from "./steps/local";
 import { stepOrca } from "./steps/orca";
 import { stepSave } from "./steps/save";
 import { stepVerify } from "./steps/verify";
-import { detectLang, setLang, t } from "./ui/i18n";
+import { detectLang, lang, setLang, t } from "./ui/i18n";
 import { Interrupted } from "./ui/prompt";
 
 /**
@@ -83,6 +84,16 @@ Nothing is installed or changed without asking; safe to run again.
   -v, --verbose                也显示通过项的详情`,
 };
 
+/**
+ * The arguments for an update setup runs: its plugin step goes to the Orca setup went by, and,
+ * when setup was told to leave the plugin or Orca alone, so is the update.
+ */
+export const updateArgs = (o: Pick<Options, "orca" | "orcaPlugin">, language: string, profile: string | undefined) => [
+  "--lang", language,
+  ...(profile ? ["--orca-profile", profile] : []),
+  ...(o.orca === "skip" || o.orcaPlugin === "skip" ? ["--orca-plugin", "skip"] : []),
+];
+
 export async function main(argv: string[], io: Io = {}): Promise<number> {
   const env = io.env ?? process.env;
   let o: Options;
@@ -117,7 +128,7 @@ export async function main(argv: string[], io: Io = {}): Promise<number> {
   const real = !io.stdin || io.stdin === process.stdin;
   if (real) process.on("SIGINT", onSignal);
   try {
-    return await run(ctx, o.check ? Promise.resolve() : refreshLatest(env));
+    return await run(ctx, o.check ? Promise.resolve() : refreshUpdateStatus(env, { force: true }).then(() => {}));
   } catch (e) {
     if (!(e instanceof Interrupted)) throw e;
     ctx.progress.close();
@@ -146,9 +157,16 @@ async function run(ctx: Ctx, notice: Promise<void>): Promise<number> {
     }
   }
 
+  // The Orca setup went by, which an update run from here updates the plugin in: named, then the one step 6 used.
+  let orcaProfile = o.orcaProfile;
   const finish = async (code: number, facts: { distro?: string; os?: string } = {}, host?: string) => {
     await notice;
     summary(ctx, host, facts);
+    // summary() printed the notice; only someone at a terminal is asked, and no is the default.
+    let updated = 0;
+    if (ctx.mode.interactive && updateNotice(lang() === "zh", ctx.env) && (await ctx.prompt.yesNo(t("Build and install it now?", "现在编译并安装？"), false))) {
+      updated = await update(updateArgs(o, lang(), orcaProfile), { env: ctx.env, out: { write: (s: string) => { for (const line of s.replace(/\n$/, "").split("\n")) ctx.term.line(line); } } });
+    }
     if (!o.check && (code === 0 || ctx.actions.length)) {
       const c = counts(ctx);
       writeState(ctx.home, {
@@ -156,7 +174,8 @@ async function run(ctx: Ctx, notice: Promise<void>): Promise<number> {
         actions: [...state.actions, ...ctx.actions], lastCheck: { at: new Date(ctx.now()).toISOString(), ...c },
       });
     }
-    return counts(ctx).failed ? 1 : code;
+    // An update asked for that didn't (wholly) work is a failed run: it said what to do.
+    return counts(ctx).failed || updated !== 0 ? 1 : code;
   };
 
   // 1. This machine.
@@ -206,6 +225,7 @@ async function run(ctx: Ctx, notice: Promise<void>): Promise<number> {
 
   // 6. Orca Server here.
   const orca = await stepOrca(ctx, central?.probe ? autoOffered(central.probe) : undefined);
+  orcaProfile = orca.runtime?.profile ?? orcaProfile;
 
   // 7. End to end.
   const ready = conn.ok && central?.ok;
